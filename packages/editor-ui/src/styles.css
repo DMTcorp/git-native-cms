@@ -447,6 +447,39 @@
     color: var(--cms-danger);
   }
 
+  .cms-button[data-disabled] {
+    cursor: not-allowed;
+    opacity: 0.48;
+  }
+
+  .cms-button[data-disabled]:active {
+    transform: none;
+  }
+
+  .cms-workflow-action {
+    border-color: color-mix(in srgb, var(--cms-review) 64%, var(--cms-line));
+    background: color-mix(in srgb, var(--cms-review) 8%, var(--cms-panel));
+    color: var(--cms-review);
+  }
+
+  .cms-workflow-action:hover {
+    border-color: var(--cms-review);
+    background: color-mix(in srgb, var(--cms-review) 13%, var(--cms-panel));
+  }
+
+  .cms-workflow-note {
+    max-width: min(42vw, 520px);
+    overflow: hidden;
+    color: var(--cms-ink);
+    font-family: var(--cms-font-data);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cms-workflow-note--error {
+    color: var(--cms-danger);
+  }
+
   .cms-field {
     display: grid;
     gap: 6px;
@@ -468,6 +501,11 @@
     background: var(--cms-panel);
     color: var(--cms-ink);
     font: inherit;
+  }
+
+  .cms-field[data-disabled] .cms-field__input {
+    cursor: not-allowed;
+    opacity: 0.66;
   }
 
   .cms-status {

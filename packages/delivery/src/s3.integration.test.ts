@@ -52,6 +52,7 @@ describe.skipIf(!runContainerTests)("S3 release contract", () => {
       },
     };
     await store.writeRelease(release);
+    await expect(store.writeRelease(release)).resolves.toBeUndefined();
     await expect(store.readRelease(release.id)).resolves.toEqual(release);
     const first: EnvironmentPointer = {
       environment: "production",

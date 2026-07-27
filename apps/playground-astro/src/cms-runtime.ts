@@ -16,6 +16,13 @@ const productionRuntime = createHostedCmsRuntime({
   origin: "https://git-native-cms-astro.vercel.app",
   projectName: "Fieldnotes / Astro",
   environment: process.env,
+  repository: {
+    owner: "DMTcorp",
+    name: "git-native-cms-sandbox-content",
+    mainBranch: "main",
+    stagingBranch: "staging",
+    homeDocumentId: "doc_home",
+  },
 });
 
 function memoryRuntime(): HostedCmsRuntime {

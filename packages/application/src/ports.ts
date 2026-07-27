@@ -157,6 +157,23 @@ export interface StoredRelease {
   readonly files: Readonly<Record<string, string>>;
 }
 
+export interface ReleaseBuildDocument {
+  readonly path: string;
+  readonly value: unknown;
+  readonly tags?: readonly string[];
+}
+
+export interface ReleaseBuilderPort {
+  build(input: {
+    readonly gitCommit: GitCommitSha;
+    readonly configVersion: number;
+    readonly registryDigest: string;
+    readonly schemaVersion: number;
+    readonly documents: readonly ReleaseBuildDocument[];
+    readonly redirects?: Readonly<Record<string, string>>;
+  }): Promise<StoredRelease>;
+}
+
 export interface EnvironmentPointer {
   readonly environment: "preview" | "staging" | "production";
   readonly releaseId: ReleaseId;

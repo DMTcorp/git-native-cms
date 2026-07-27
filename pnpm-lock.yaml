@@ -138,6 +138,9 @@ importers:
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@git-native-cms/delivery':
+        specifier: workspace:*
+        version: link:../../packages/delivery
       '@git-native-cms/editor':
         specifier: workspace:*
         version: link:../../packages/editor
@@ -196,6 +199,9 @@ importers:
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@git-native-cms/delivery':
+        specifier: workspace:*
+        version: link:../../packages/delivery
       '@git-native-cms/editor':
         specifier: workspace:*
         version: link:../../packages/editor
@@ -508,6 +514,9 @@ importers:
       '@git-native-cms/permissions':
         specifier: workspace:*
         version: link:../permissions
+      '@git-native-cms/release-builder':
+        specifier: workspace:*
+        version: link:../release-builder
       '@git-native-cms/server':
         specifier: workspace:*
         version: link:../server

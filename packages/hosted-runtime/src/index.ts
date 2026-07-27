@@ -7,6 +7,7 @@ import {
   type IdGenerator,
   type IdempotencyStore,
   type SessionRecord,
+  type StoredRelease,
 } from "@git-native-cms/application";
 import {
   createGitHubOAuthAttempt,
@@ -38,9 +39,11 @@ import {
 } from "@git-native-cms/github";
 import { MemoryWebhookReplayStore, receiveSignedWebhook } from "@git-native-cms/integrations";
 import { AuthorizationService } from "@git-native-cms/permissions";
+import { deterministicReleaseBuilder } from "@git-native-cms/release-builder";
 import { createCmsServer, type CmsServer } from "@git-native-cms/server";
 import { readSessionCookie, RotatingCookieSessionService } from "@git-native-cms/sessions";
 import { EncryptJWT, jwtDecrypt } from "jose";
+import { S3AuditSink, S3IdempotencyStore, S3WebhookReplayStore } from "./runtime-state.js";
 
 const AUTH_PATH = "/api/cms/auth/github";
 const WEBHOOK_PATH = "/api/cms/webhooks/github";
@@ -120,6 +123,7 @@ interface InitializedRuntime {
   readonly ensureChange: (actor: Actor) => Promise<Change>;
   readonly content: GitContentRepository;
   readonly config: RuntimeConfiguration;
+  readonly replayStore: MemoryWebhookReplayStore | S3WebhookReplayStore;
 }
 
 function required(
@@ -257,7 +261,10 @@ function rolesFor(permissions: Readonly<Record<string, boolean>>): readonly Role
   return ["viewer"];
 }
 
-async function githubIdentity(accessToken: string): Promise<GitHubIdentity> {
+async function githubIdentity(
+  accessToken: string,
+  repository: { readonly owner: string; readonly name: string },
+): Promise<GitHubIdentity> {
   const headers = {
     accept: "application/vnd.github+json",
     authorization: `Bearer ${accessToken}`,
@@ -265,10 +272,13 @@ async function githubIdentity(accessToken: string): Promise<GitHubIdentity> {
   };
   const [userResponse, repositoryResponse] = await Promise.all([
     fetch("https://api.github.com/user", { headers, redirect: "error" }),
-    fetch("https://api.github.com/repos/DMTcorp/git-native-cms-sandbox-content", {
-      headers,
-      redirect: "error",
-    }),
+    fetch(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`,
+      {
+        headers,
+        redirect: "error",
+      },
+    ),
   ]);
   if (!userResponse.ok || !repositoryResponse.ok) {
     throw new CmsError({
@@ -279,11 +289,11 @@ async function githubIdentity(accessToken: string): Promise<GitHubIdentity> {
     });
   }
   const user = (await userResponse.json()) as Record<string, unknown>;
-  const repository = (await repositoryResponse.json()) as Record<string, unknown>;
+  const repositoryData = (await repositoryResponse.json()) as Record<string, unknown>;
   if (typeof user.id !== "number" || typeof user.login !== "string") {
     throw new Error("GitHub returned an invalid user profile.");
   }
-  const permissionValue = repository.permissions;
+  const permissionValue = repositoryData.permissions;
   const permissions =
     typeof permissionValue === "object" && permissionValue !== null
       ? (permissionValue as Readonly<Record<string, boolean>>)
@@ -350,9 +360,18 @@ export function createHostedCmsRuntime(options: {
   readonly origin: string;
   readonly projectName: string;
   readonly environment: HostedRuntimeEnvironment;
+  readonly repository: {
+    readonly owner: string;
+    readonly name: string;
+    readonly mainBranch?: string;
+    readonly stagingBranch?: string;
+    readonly homeDocumentId?: string;
+  };
 }): HostedCmsRuntime {
   let initialized: Promise<InitializedRuntime> | undefined;
-  const replayStore = new MemoryWebhookReplayStore();
+  const mainBranch = options.repository.mainBranch ?? "main";
+  const stagingBranch = options.repository.stagingBranch ?? "staging";
+  const homeDocumentId = (options.repository.homeDocumentId ?? HOME_DOCUMENT_ID) as DocumentId;
 
   const initialize = async (): Promise<InitializedRuntime> => {
     const config = configuration(options.environment);
@@ -363,8 +382,8 @@ export function createHostedCmsRuntime(options: {
     });
     const git = new GitHubGitProvider({
       requester,
-      owner: "DMTcorp",
-      repository: "git-native-cms-sandbox-content",
+      owner: options.repository.owner,
+      repository: options.repository.name,
     });
     const content = new GitContentRepository(git);
     const clock = new SystemClock();
@@ -399,21 +418,53 @@ export function createHostedCmsRuntime(options: {
             client: s3,
             bucket: options.environment.CMS_RELEASES_BUCKET as string,
           });
+    const stateOptions =
+      s3 === undefined || options.environment.CMS_RELEASES_BUCKET === undefined
+        ? undefined
+        : { client: s3, bucket: options.environment.CMS_RELEASES_BUCKET };
+    const idempotency =
+      stateOptions === undefined
+        ? new RuntimeIdempotencyStore()
+        : new S3IdempotencyStore(stateOptions);
+    const auditSink =
+      stateOptions === undefined ? new RuntimeAuditSink() : new S3AuditSink(stateOptions);
+    const replayStore =
+      stateOptions === undefined
+        ? new MemoryWebhookReplayStore()
+        : new S3WebhookReplayStore(stateOptions);
     const application = createCmsApplication({
       git,
       content,
       authorization: new AuthorizationService(),
       clock,
       ids,
-      idempotency: new RuntimeIdempotencyStore(),
-      audit: new RuntimeAuditSink(),
+      idempotency,
+      audit: auditSink,
       review: new GitHubReviewPort({
         requester,
-        owner: "DMTcorp",
-        repository: "git-native-cms-sandbox-content",
+        owner: options.repository.owner,
+        repository: options.repository.name,
       }),
-      ...(releaseStore === undefined ? {} : { releaseStore }),
+      mainBranch,
+      stagingBranch,
+      ...(releaseStore === undefined
+        ? {}
+        : { releaseStore, releaseBuilder: deterministicReleaseBuilder }),
     });
+
+    const lifecycleChange = async (
+      ref: string,
+      actor: Actor,
+      status: Change["status"],
+    ): Promise<Change | undefined> => {
+      const files = await git.listFiles({ ref, prefix: ".cms/changes/" });
+      return files
+        .flatMap((file) => {
+          const change = changeFrom(yamlCodec.parse(file.content));
+          return change?.ownerId === actor.id && change.status === status ? [change] : [];
+        })
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    };
 
     const ensureChange = async (actor: Actor): Promise<Change> => {
       const branchName = `cms/${safeLogin(actor.login)}/sandbox`;
@@ -421,7 +472,9 @@ export function createHostedCmsRuntime(options: {
       const decoded =
         existing === undefined ? undefined : changeFrom(yamlCodec.parse(existing.content));
       if (decoded !== undefined) return decoded;
-      const main = await git.resolveRef("main");
+      const staged = await lifecycleChange(stagingBranch, actor, "staging");
+      if (staged !== undefined) return staged;
+      const main = await git.resolveRef(mainBranch);
       const branch = await git.createBranch({
         branch: branchName,
         from: main.sha,
@@ -432,7 +485,7 @@ export function createHostedCmsRuntime(options: {
         name: "Sandbox editorial change",
         description: "A real Git-backed Change created by the public hosted playground.",
         ownerId: actor.id,
-        baseBranch: "main",
+        baseBranch: mainBranch,
         baseCommit: main.sha,
         branchName,
         status: "draft",
@@ -457,6 +510,13 @@ export function createHostedCmsRuntime(options: {
         throw error;
       }
     };
+
+    const contentRef = (change: Change): string =>
+      change.status === "staging"
+        ? stagingBranch
+        : change.status === "published"
+          ? mainBranch
+          : change.branchName;
 
     const actorForRequest = async (request: Request): Promise<Actor | undefined> => {
       const token = readSessionCookie(request.headers.get("cookie"));
@@ -486,7 +546,7 @@ export function createHostedCmsRuntime(options: {
           actor: context.actor,
           project: {
             name: options.projectName,
-            repository: "DMTcorp/git-native-cms-sandbox-content",
+            repository: `${options.repository.owner}/${options.repository.name}`,
             locales: ["en-US", "pl-PL"],
           },
           capabilities: {
@@ -518,12 +578,25 @@ export function createHostedCmsRuntime(options: {
               retryable: false,
             });
           }
-          return content.listDocuments({ ref: change.branchName });
+          return content.listDocuments({ ref: contentRef(change) });
         },
-        listReleases: async () => [],
+        listReleases: async () => {
+          if (releaseStore === undefined) return [];
+          const pointers = await Promise.all(
+            (["preview", "staging", "production"] as const).map((environment) =>
+              releaseStore.readPointer(environment),
+            ),
+          );
+          const ids = [
+            ...new Set(pointers.flatMap((pointer) => (pointer ? [pointer.releaseId] : []))),
+          ];
+          return (await Promise.all(ids.map((id) => releaseStore.readRelease(id)))).filter(
+            (release): release is StoredRelease => release !== undefined,
+          );
+        },
       },
     });
-    return { server, sessions, ensureChange, content, config };
+    return { server, sessions, ensureChange, content, config, replayStore };
   };
 
   const runtime = (): Promise<InitializedRuntime> => (initialized ??= initialize());
@@ -582,7 +655,7 @@ export function createHostedCmsRuntime(options: {
             redirectUri: `${options.origin}${AUTH_PATH}/callback`,
             signal: request.signal,
           });
-          const identity = await githubIdentity(token.accessToken);
+          const identity = await githubIdentity(token.accessToken, options.repository);
           const actor: Actor = {
             id: actorId(identity.id),
             githubId: identity.id,
@@ -615,7 +688,7 @@ export function createHostedCmsRuntime(options: {
             body,
             signature: request.headers.get("x-hub-signature-256"),
             deliveryId: request.headers.get("x-github-delivery"),
-            replayStore,
+            replayStore: current.replayStore,
           });
           return Response.json(
             { accepted: true, event: request.headers.get("x-github-event"), action: event.action },
@@ -648,8 +721,13 @@ export function createHostedCmsRuntime(options: {
         const session: SessionRecord = await current.sessions.read(token);
         const change = await current.ensureChange(session.actor);
         const document = (await current.content.readDocument({
-          ref: change.branchName,
-          documentId: HOME_DOCUMENT_ID,
+          ref:
+            change.status === "staging"
+              ? stagingBranch
+              : change.status === "published"
+                ? mainBranch
+                : change.branchName,
+          documentId: homeDocumentId,
         })) as ContentDocument<HostedEditablePage>;
         return {
           authenticated: true,

@@ -1,5 +1,10 @@
 ---
+import { CmsPageRenderer } from "@git-native-cms/react";
+import { sandboxRegistry } from "../cms-registry";
+import { loadPublishedPage } from "../public-content";
 import "../styles/site.css";
+
+const document = await loadPublishedPage();
 ---
 
 <html lang="en">
@@ -14,17 +19,7 @@ import "../styles/site.css";
         <a href="/">Fieldnotes / Astro</a>
         <a href="/cms">Open CMS</a>
       </nav>
-      <section class="hero">
-        <div>
-          <span class="eyebrow">Built with Astro</span>
-          <h1>One content model. Two real renderers.</h1>
-          <p>The same editorial workflow drives this Astro site and its Next.js counterpart.</p>
-        </div>
-        <aside class="release-card">
-          <strong>Immutable release</strong>
-          <code>rel_71c82b10f3c9174b</code>
-        </aside>
-      </section>
+      <CmsPageRenderer document={document} registry={sandboxRegistry} />
     </main>
   </body>
 </html>

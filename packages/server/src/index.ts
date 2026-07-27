@@ -266,7 +266,7 @@ export function createCmsServer(options: CmsServerOptions): CmsServer {
           }
           if (request.method === "POST" && segments[2] === "submit") {
             const input = await body(request);
-            const pullRequest = await options.application.submitChange.execute(
+            const result = await options.application.submitChange.execute(
               {
                 change,
                 expectedRevision: requiredString(
@@ -279,7 +279,7 @@ export function createCmsServer(options: CmsServerOptions): CmsServer {
               },
               context,
             );
-            return json("change.submitted", { pullRequest }, 200, requestId);
+            return json("change.submitted", result, 200, requestId);
           }
           if (request.method === "POST" && segments[2] === "comments") {
             const input = await body(request);
@@ -297,19 +297,7 @@ export function createCmsServer(options: CmsServerOptions): CmsServer {
           }
           if (request.method === "POST" && segments[2] === "approve") {
             const input = await body(request);
-            await options.application.approveChange.execute(
-              {
-                change,
-                pullRequestNumber: requiredNumber(input.pullRequestNumber, "pullRequestNumber"),
-                ...(typeof input.body === "string" ? { body: input.body } : {}),
-              },
-              context,
-            );
-            return json("change.approved", { changeId: change.id }, 200, requestId);
-          }
-          if (request.method === "POST" && segments[2] === "staging") {
-            const input = await body(request);
-            const revision = await options.application.addChangeToStaging.execute(
+            const result = await options.application.approveChange.execute(
               {
                 change,
                 pullRequestNumber: requiredNumber(input.pullRequestNumber, "pullRequestNumber"),
@@ -317,11 +305,66 @@ export function createCmsServer(options: CmsServerOptions): CmsServer {
                   input.expectedRevision,
                   "expectedRevision",
                 ) as Change["baseCommit"],
+                idempotencyKey:
+                  request.headers.get("idempotency-key") ??
+                  requiredString(input.idempotencyKey, "idempotencyKey"),
+                ...(typeof input.body === "string" ? { body: input.body } : {}),
               },
               context,
             );
-            return json("change.staged", { changeId: change.id, revision }, 200, requestId);
+            return json("change.approved", result, 200, requestId);
           }
+          if (request.method === "POST" && segments[2] === "staging") {
+            const input = await body(request);
+            const result = await options.application.addChangeToStaging.execute(
+              {
+                change,
+                pullRequestNumber: requiredNumber(input.pullRequestNumber, "pullRequestNumber"),
+                expectedRevision: requiredString(
+                  input.expectedRevision,
+                  "expectedRevision",
+                ) as Change["baseCommit"],
+                idempotencyKey:
+                  request.headers.get("idempotency-key") ??
+                  requiredString(input.idempotencyKey, "idempotencyKey"),
+              },
+              context,
+            );
+            return json("change.staged", result, 200, requestId);
+          }
+        }
+        if (request.method === "POST" && segments.join("/") === "staging/publish") {
+          const input = await body(request);
+          const result = await options.application.publishStaging.execute(
+            {
+              expectedStagingRevision: requiredString(
+                input.expectedStagingRevision,
+                "expectedStagingRevision",
+              ) as Change["baseCommit"],
+              title: requiredString(input.title, "title"),
+              configVersion: requiredNumber(input.configVersion, "configVersion"),
+              registryDigest: requiredString(input.registryDigest, "registryDigest"),
+              schemaVersion: requiredNumber(input.schemaVersion, "schemaVersion"),
+              ...(typeof input.expectedPointerRevision === "string"
+                ? { expectedPointerRevision: input.expectedPointerRevision }
+                : {}),
+              idempotencyKey:
+                request.headers.get("idempotency-key") ??
+                requiredString(input.idempotencyKey, "idempotencyKey"),
+            },
+            context,
+          );
+          return json(
+            "staging.published",
+            {
+              mainRevision: result.mainRevision,
+              stagingRevision: result.stagingRevision,
+              releaseId: result.release.id,
+              manifest: result.release.manifest,
+            },
+            200,
+            requestId,
+          );
         }
         if (request.method === "POST" && segments.join("/") === "staging/promote") {
           const input = await body(request);
@@ -344,6 +387,44 @@ export function createCmsServer(options: CmsServerOptions): CmsServer {
           return json(
             "releases.list",
             { items: await options.queries.listReleases(context) },
+            200,
+            requestId,
+          );
+        }
+        if (request.method === "POST" && segments.join("/") === "releases/build-and-publish") {
+          const input = await body(request);
+          const environment = requiredString(input.environment, "environment");
+          if (!["preview", "staging", "production"].includes(environment)) {
+            throw new CmsError({
+              code: "CMS_REQUEST_005",
+              message: "environment must be preview, staging, or production.",
+              category: "validation",
+              retryable: false,
+            });
+          }
+          const release = await options.application.buildAndPublishRelease.execute(
+            {
+              ref: requiredString(input.ref, "ref"),
+              expectedRevision: requiredString(
+                input.expectedRevision,
+                "expectedRevision",
+              ) as Change["baseCommit"],
+              environment: environment as "preview" | "staging" | "production",
+              configVersion: requiredNumber(input.configVersion, "configVersion"),
+              registryDigest: requiredString(input.registryDigest, "registryDigest"),
+              schemaVersion: requiredNumber(input.schemaVersion, "schemaVersion"),
+              ...(typeof input.expectedPointerRevision === "string"
+                ? { expectedPointerRevision: input.expectedPointerRevision }
+                : {}),
+              idempotencyKey:
+                request.headers.get("idempotency-key") ??
+                requiredString(input.idempotencyKey, "idempotencyKey"),
+            },
+            context,
+          );
+          return json(
+            "release.built-and-published",
+            { releaseId: release.id, manifest: release.manifest },
             200,
             requestId,
           );

@@ -214,29 +214,24 @@ export async function callCmsTool(
         string(input.changeId, "changeId"),
         context.request,
       );
-      return {
-        pullRequest: await context.application.submitChange.execute(
-          {
-            change,
-            expectedRevision: string(
-              input.expectedRevision,
-              "expectedRevision",
-            ) as Change["baseCommit"],
-            idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
-          },
-          context.request,
-        ),
-      };
+      return context.application.submitChange.execute(
+        {
+          change,
+          expectedRevision: string(
+            input.expectedRevision,
+            "expectedRevision",
+          ) as Change["baseCommit"],
+          idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
+        },
+        context.request,
+      );
     }
     case "get_preview": {
       if (context.queries.previewUrl === undefined) {
         throw new Error("Preview URLs are not configured.");
       }
       return {
-        url: await context.queries.previewUrl(
-          string(input.changeId, "changeId"),
-          context.request,
-        ),
+        url: await context.queries.previewUrl(string(input.changeId, "changeId"), context.request),
       };
     }
     case "publish_staging": {

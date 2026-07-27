@@ -101,6 +101,17 @@ async function responseBody(
   return body.transformToString();
 }
 
+function statusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("$metadata" in error)) return undefined;
+  return (error as { readonly $metadata?: { readonly httpStatusCode?: number } }).$metadata
+    ?.httpStatusCode;
+}
+
+function isConditionalConflict(error: unknown): boolean {
+  const status = statusCode(error);
+  return status === 409 || status === 412;
+}
+
 export class S3ReleaseStore implements ReleaseStore {
   constructor(
     private readonly options: {
@@ -117,46 +128,68 @@ export class S3ReleaseStore implements ReleaseStore {
 
   async writeRelease(release: StoredRelease, signal?: AbortSignal): Promise<void> {
     await Promise.all(
-      Object.entries(release.files).map(([path, content]) =>
-        this.options.client.send(
-          new PutObjectCommand({
-            Bucket: this.options.bucket,
-            Key: this.key(`releases/${release.id}/${path}`),
-            Body: content,
-            ContentType: "application/json; charset=utf-8",
-            CacheControl: "public, max-age=31536000, immutable",
-            IfNoneMatch: "*",
-          }),
-          signal === undefined ? undefined : { abortSignal: signal },
-        ),
-      ),
+      Object.entries(release.files).map(async ([path, content]) => {
+        const key = this.key(`releases/${release.id}/${path}`);
+        try {
+          await this.options.client.send(
+            new PutObjectCommand({
+              Bucket: this.options.bucket,
+              Key: key,
+              Body: content,
+              ContentType: "application/json; charset=utf-8",
+              CacheControl: "public, max-age=31536000, immutable",
+              IfNoneMatch: "*",
+            }),
+            signal === undefined ? undefined : { abortSignal: signal },
+          );
+        } catch (error) {
+          if (!isConditionalConflict(error)) throw error;
+          const existing = await this.options.client.send(
+            new GetObjectCommand({ Bucket: this.options.bucket, Key: key }),
+            signal === undefined ? undefined : { abortSignal: signal },
+          );
+          if ((await responseBody(existing.Body)) !== content) {
+            throw new CmsError({
+              code: "CMS_STORAGE_010",
+              message: `Immutable release file ${path} already exists with different content.`,
+              category: "storage",
+              retryable: false,
+            });
+          }
+        }
+      }),
     );
   }
 
   async readRelease(id: ReleaseId, signal?: AbortSignal): Promise<StoredRelease | undefined> {
     try {
-      const listed = await this.options.client.send(
-        new ListObjectsV2Command({
-          Bucket: this.options.bucket,
-          Prefix: this.key(`releases/${id}/`),
-        }),
-        signal === undefined ? undefined : { abortSignal: signal },
-      );
       const files: Record<string, string> = {};
-      await Promise.all(
-        (listed.Contents ?? []).map(async (object) => {
-          if (object.Key === undefined) return;
-          const response = await this.options.client.send(
-            new GetObjectCommand({ Bucket: this.options.bucket, Key: object.Key }),
-            signal === undefined ? undefined : { abortSignal: signal },
-          );
-          const marker = `/releases/${id}/`;
-          const markerIndex = `/${object.Key}`.indexOf(marker);
-          const path =
-            markerIndex >= 0 ? `/${object.Key}`.slice(markerIndex + marker.length) : object.Key;
-          files[path] = await responseBody(response.Body);
-        }),
-      );
+      let continuationToken: string | undefined;
+      do {
+        const listed = await this.options.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.options.bucket,
+            Prefix: this.key(`releases/${id}/`),
+            ...(continuationToken === undefined ? {} : { ContinuationToken: continuationToken }),
+          }),
+          signal === undefined ? undefined : { abortSignal: signal },
+        );
+        await Promise.all(
+          (listed.Contents ?? []).map(async (object) => {
+            if (object.Key === undefined) return;
+            const response = await this.options.client.send(
+              new GetObjectCommand({ Bucket: this.options.bucket, Key: object.Key }),
+              signal === undefined ? undefined : { abortSignal: signal },
+            );
+            const marker = `/releases/${id}/`;
+            const markerIndex = `/${object.Key}`.indexOf(marker);
+            const path =
+              markerIndex >= 0 ? `/${object.Key}`.slice(markerIndex + marker.length) : object.Key;
+            files[path] = await responseBody(response.Body);
+          }),
+        );
+        continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+      } while (continuationToken !== undefined);
       const manifestSource = files["manifest.json"];
       if (manifestSource === undefined) return undefined;
       return {
@@ -236,17 +269,28 @@ export class S3ReleaseStore implements ReleaseStore {
         retryable: true,
       });
     }
-    await this.options.client.send(
-      new PutObjectCommand({
-        Bucket: this.options.bucket,
-        Key: key,
-        Body: canonicalJson(input.next),
-        ContentType: "application/json; charset=utf-8",
-        CacheControl: "no-store, max-age=0",
-        ...(etag === undefined ? { IfNoneMatch: "*" } : { IfMatch: etag }),
-      }),
-      input.signal === undefined ? undefined : { abortSignal: input.signal },
-    );
+    try {
+      await this.options.client.send(
+        new PutObjectCommand({
+          Bucket: this.options.bucket,
+          Key: key,
+          Body: canonicalJson(input.next),
+          ContentType: "application/json; charset=utf-8",
+          CacheControl: "no-store, max-age=0",
+          ...(etag === undefined ? { IfNoneMatch: "*" } : { IfMatch: etag }),
+        }),
+        input.signal === undefined ? undefined : { abortSignal: input.signal },
+      );
+    } catch (error) {
+      if (!isConditionalConflict(error)) throw error;
+      throw new CmsError({
+        code: "CMS_STORAGE_009",
+        message: "The environment pointer changed during publication.",
+        category: "conflict",
+        retryable: true,
+        cause: error,
+      });
+    }
     return input.next;
   }
 }

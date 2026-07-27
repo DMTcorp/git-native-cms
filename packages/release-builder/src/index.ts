@@ -1,4 +1,9 @@
-import type { EnvironmentPointer, ReleaseStore, StoredRelease } from "@git-native-cms/application";
+import type {
+  EnvironmentPointer,
+  ReleaseBuilderPort,
+  ReleaseStore,
+  StoredRelease,
+} from "@git-native-cms/application";
 import { canonicalJson } from "@git-native-cms/content-codecs";
 import type { GitCommitSha, ReleaseId } from "@git-native-cms/core";
 
@@ -65,6 +70,10 @@ export async function buildRelease(input: BuildReleaseInput): Promise<StoredRele
   files["checksums.json"] = canonicalJson(checksums);
   return { id, manifest, files };
 }
+
+export const deterministicReleaseBuilder: ReleaseBuilderPort = {
+  build: buildRelease,
+};
 
 export async function publishRelease(input: {
   readonly store: ReleaseStore;

@@ -233,10 +233,32 @@ export class GitHubGitProvider implements GitProvider {
   }
 
   async approvePullRequest(input: Parameters<GitProvider["approvePullRequest"]>[0]): Promise<void> {
-    await this.requester.request(
-      "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-      this.parameters({ pull_number: input.number, event: "APPROVE", body: input.body ?? "" }),
-    );
+    try {
+      await this.requester.request(
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+        this.parameters({ pull_number: input.number, event: "APPROVE", body: input.body ?? "" }),
+      );
+    } catch (error) {
+      const status =
+        typeof error === "object" && error !== null && "status" in error
+          ? (error as { readonly status?: number }).status
+          : undefined;
+      if (status !== 422) throw error;
+      await this.requester.request(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        this.parameters({
+          issue_number: input.number,
+          body: [
+            `Approved in Git-native CMS by @${input.actor.login}.`,
+            input.body ?? "",
+            "",
+            "<!-- git-native-cms-approval -->",
+          ]
+            .filter((line) => line.length > 0)
+            .join("\n\n"),
+        }),
+      );
+    }
   }
 
   async mergePullRequest(input: Parameters<GitProvider["mergePullRequest"]>[0]): Promise<GitRef> {

@@ -1,15 +1,8 @@
 "use client";
 
-import {
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type ReactElement,
-} from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from "react";
 import { create } from "zustand";
-import type { Change, ContentDocument, Revision } from "@git-native-cms/core";
+import type { Change, ChangeStatus, ContentDocument, Revision } from "@git-native-cms/core";
 import { applyPatches, contentPath, type ContentPatch } from "@git-native-cms/document-model";
 import { PREVIEW_CHANNEL } from "@git-native-cms/protocol/preview";
 import { Button, ChangeRail, StatusBadge, TextField } from "@git-native-cms/editor-ui";
@@ -57,6 +50,16 @@ export interface EditorAppProps {
     readonly expectedRevision: Revision;
     readonly patches: readonly ContentPatch[];
   }) => Promise<Revision>;
+  readonly onWorkflowAction?: (input: {
+    readonly action: "submit" | "approve" | "stage" | "publish";
+    readonly expectedRevision: Revision;
+    readonly pullRequestNumber?: number;
+  }) => Promise<{
+    readonly status: ChangeStatus;
+    readonly revision: Revision;
+    readonly pullRequestNumber?: number;
+    readonly releaseId?: string;
+  }>;
 }
 
 export interface RecoverySnapshot {
@@ -111,12 +114,39 @@ function sectionLabel(section: EditableSection): string {
   return section.heading?.trim() || section.type;
 }
 
+function workflowAction(
+  status: ChangeStatus,
+):
+  | { readonly action: "submit" | "approve" | "stage" | "publish"; readonly label: string }
+  | undefined {
+  switch (status) {
+    case "draft":
+    case "changes_requested":
+      return { action: "submit", label: "Send for review" };
+    case "in_review":
+      return { action: "approve", label: "Approve Change" };
+    case "approved":
+      return { action: "stage", label: "Add to staging" };
+    case "staging":
+      return { action: "publish", label: "Publish live" };
+    case "published":
+    case "archived":
+      return undefined;
+  }
+}
+
 export function EditorApp(props: EditorAppProps): ReactElement {
   const [hydrated, setHydrated] = useState(false);
   const [previewConnected, setPreviewConnected] = useState(false);
   const [patches, setPatches] = useState<readonly ContentPatch[]>([]);
   const [revision, setRevision] = useState(props.document.revision);
   const [saveState, setSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
+  const [changeStatus, setChangeStatus] = useState(props.change.status);
+  const [pullRequestNumber, setPullRequestNumber] = useState(props.change.pullRequestNumber);
+  const [workflowState, setWorkflowState] = useState<"idle" | "working" | "complete" | "error">(
+    "idle",
+  );
+  const [workflowNote, setWorkflowNote] = useState<string | undefined>(undefined);
   const iframe = useRef<HTMLIFrameElement>(null);
   const previewPort = useRef<MessagePort | undefined>(undefined);
   const {
@@ -134,11 +164,9 @@ export function EditorApp(props: EditorAppProps): ReactElement {
   const sections = document.sections ?? [];
   const selectedIndex = sections.findIndex((section) => section.id === selectedSectionId);
   const selectedSection = selectedIndex < 0 ? undefined : sections[selectedIndex];
+  const editable = changeStatus === "draft" || changeStatus === "changes_requested";
   const reactId = useId();
-  const sessionId = useMemo(
-    () => `cms-${reactId.replaceAll(":", "")}`,
-    [reactId],
-  );
+  const sessionId = useMemo(() => `cms-${reactId.replaceAll(":", "")}`, [reactId]);
 
   useEffect(() => {
     setHydrated(true);
@@ -207,6 +235,7 @@ export function EditorApp(props: EditorAppProps): ReactElement {
   }, [document, props.previewUrl, sessionId]);
 
   function addPatch(patch: ContentPatch): void {
+    if (!editable) return;
     const next = [...patches, patch];
     setPatches(next);
     setSaveState("dirty");
@@ -241,6 +270,47 @@ export function EditorApp(props: EditorAppProps): ReactElement {
     }
   }
 
+  async function advanceWorkflow(): Promise<void> {
+    const next = workflowAction(changeStatus);
+    if (
+      next === undefined ||
+      props.onWorkflowAction === undefined ||
+      patches.length > 0 ||
+      workflowState === "working"
+    ) {
+      return;
+    }
+    setWorkflowState("working");
+    setWorkflowNote(undefined);
+    try {
+      const result = await props.onWorkflowAction({
+        action: next.action,
+        expectedRevision: revision,
+        ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }),
+      });
+      setChangeStatus(result.status);
+      setRevision(result.revision);
+      if (result.pullRequestNumber !== undefined) {
+        setPullRequestNumber(result.pullRequestNumber);
+      }
+      setWorkflowState("complete");
+      setWorkflowNote(
+        result.releaseId === undefined
+          ? `${next.label} completed.`
+          : `Published release ${result.releaseId}.`,
+      );
+    } catch (error) {
+      setWorkflowState("error");
+      setWorkflowNote(
+        error instanceof Error
+          ? error.message
+          : "The workflow could not advance. Refresh and try again.",
+      );
+    }
+  }
+
+  const nextWorkflowAction = workflowAction(changeStatus);
+
   return (
     <div
       className="cms-app cms-editor-shell"
@@ -261,11 +331,11 @@ export function EditorApp(props: EditorAppProps): ReactElement {
         </div>
         <ChangeRail
           current={
-            props.change.status === "published"
+            changeStatus === "published"
               ? "live"
-              : props.change.status === "staging"
+              : changeStatus === "staging"
                 ? "staging"
-                : props.change.status === "in_review" || props.change.status === "approved"
+                : changeStatus === "in_review" || changeStatus === "approved"
                   ? "review"
                   : "change"
           }
@@ -277,10 +347,19 @@ export function EditorApp(props: EditorAppProps): ReactElement {
           <Button
             tone="primary"
             onPress={() => void save()}
-            isDisabled={hydrated && (patches.length === 0 || saveState === "saving")}
+            isDisabled={hydrated && (!editable || patches.length === 0 || saveState === "saving")}
           >
             {saveState === "saving" ? "Saving…" : "Save changes"}
           </Button>
+          {nextWorkflowAction !== undefined && props.onWorkflowAction !== undefined && (
+            <Button
+              className="cms-workflow-action"
+              onPress={() => void advanceWorkflow()}
+              isDisabled={patches.length > 0 || workflowState === "working"}
+            >
+              {workflowState === "working" ? "Working…" : nextWorkflowAction.label}
+            </Button>
+          )}
         </div>
       </header>
 
@@ -289,7 +368,7 @@ export function EditorApp(props: EditorAppProps): ReactElement {
           <div className="cms-panel-heading">
             <span>Page structure</span>
             <StatusBadge tone={patches.length > 0 ? "review" : "draft"}>
-              {patches.length > 0 ? `${patches.length} edits` : "Draft"}
+              {patches.length > 0 ? `${patches.length} edits` : changeStatus.replaceAll("_", " ")}
             </StatusBadge>
           </div>
           <ol className="cms-section-tree">
@@ -311,7 +390,9 @@ export function EditorApp(props: EditorAppProps): ReactElement {
               </li>
             ))}
           </ol>
-          <Button className="cms-add-section">Add section</Button>
+          <Button className="cms-add-section" isDisabled={!editable}>
+            Add section
+          </Button>
           <div className="cms-navigation-groups">
             {["Pages", "Collections", "Globals", "Assets"].map((label) => (
               <button type="button" key={label}>
@@ -375,6 +456,7 @@ export function EditorApp(props: EditorAppProps): ReactElement {
                   <TextField
                     label="Heading"
                     value={selectedSection.heading ?? ""}
+                    isDisabled={!editable}
                     onChange={(value) =>
                       addPatch({
                         op: "set",
@@ -393,6 +475,7 @@ export function EditorApp(props: EditorAppProps): ReactElement {
                   <TextField
                     label="Description"
                     value={selectedSection.description ?? ""}
+                    isDisabled={!editable}
                     onChange={(value) =>
                       addPatch({
                         op: "set",
@@ -440,6 +523,9 @@ export function EditorApp(props: EditorAppProps): ReactElement {
         </span>
         <span className="cms-statusbar-spacer" />
         <span>{sections.length} sections</span>
+        <span className={`cms-workflow-note cms-workflow-note--${workflowState}`}>
+          {workflowNote ?? `Status: ${changeStatus.replaceAll("_", " ")}`}
+        </span>
         <span>{previewConnected ? "Preview connected" : "Connecting preview…"}</span>
       </footer>
     </div>

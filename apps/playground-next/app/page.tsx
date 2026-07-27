@@ -1,6 +1,12 @@
 import Link from "next/link";
+import { CmsPageRenderer } from "@git-native-cms/react";
+import { sandboxRegistry } from "../cms.registry";
+import { loadPublishedPage } from "../public-content";
 
-export default function HomePage() {
+export const dynamic = "force-dynamic";
+
+export default async function HomePage() {
+  const document = await loadPublishedPage();
   return (
     <main className="site-shell">
       <nav className="site-nav">
@@ -12,28 +18,7 @@ export default function HomePage() {
           </Link>
         </div>
       </nav>
-      <section className="hero">
-        <div>
-          <span className="hero__eyebrow">A Git-native publication</span>
-          <h1>Editorial work, without the machinery showing.</h1>
-          <p>
-            Build pages with real frontend components, review every Change and publish one immutable
-            version at a time.
-          </p>
-        </div>
-        <aside className="hero__proof" aria-label="Publication workflow">
-          <span>Current proof</span>
-          <ol>
-            <li>Change prepared</li>
-            <li>Review complete</li>
-            <li>Ready for staging</li>
-          </ol>
-        </aside>
-      </section>
-      <section className="site-section" id="journal">
-        <span className="hero__eyebrow">From the journal</span>
-        <h2>The public site contains no editor runtime.</h2>
-      </section>
+      <CmsPageRenderer document={document} registry={sandboxRegistry} />
     </main>
   );
 }

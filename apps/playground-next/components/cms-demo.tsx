@@ -1,6 +1,7 @@
 "use client";
 
 import type { HostedEditorState } from "@git-native-cms/hosted-runtime";
+import { advanceHostedWorkflow } from "@git-native-cms/hosted-runtime/client";
 import type { Revision } from "@git-native-cms/core";
 import { CmsEditorPage } from "@git-native-cms/next/editor";
 
@@ -49,6 +50,16 @@ export function CmsDemo(props: { readonly state: HostedEditorState }) {
         };
         return envelope.payload.document.revision;
       }}
+      onWorkflowAction={({ action, expectedRevision, pullRequestNumber }) =>
+        advanceHostedWorkflow({
+          action,
+          changeId: change.id,
+          changeName: change.name,
+          csrfToken,
+          expectedRevision,
+          ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }),
+        })
+      }
     />
   );
 }

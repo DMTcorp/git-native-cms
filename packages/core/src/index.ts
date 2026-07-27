@@ -91,6 +91,8 @@ export interface Change {
   readonly baseCommit: GitCommitSha;
   readonly branchName: string;
   readonly status: ChangeStatus;
+  readonly pullRequestNumber?: number;
+  readonly pullRequestUrl?: string;
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
 }

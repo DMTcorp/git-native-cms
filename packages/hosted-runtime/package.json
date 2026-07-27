@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
     }
   },
   "dependencies": {
@@ -24,6 +28,7 @@
     "@git-native-cms/github": "workspace:*",
     "@git-native-cms/integrations": "workspace:*",
     "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/release-builder": "workspace:*",
     "@git-native-cms/server": "workspace:*",
     "@git-native-cms/sessions": "workspace:*",
     "jose": "catalog:"
