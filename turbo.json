@@ -1,5 +1,23 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": [
+    "CMS_HOSTED_RUNTIME",
+    "CMS_SESSION_SECRET",
+    "CMS_S3_ENDPOINT",
+    "CMS_S3_REGION",
+    "CMS_S3_ACCESS_KEY_ID",
+    "CMS_S3_SECRET_ACCESS_KEY",
+    "CMS_ASSETS_BUCKET",
+    "CMS_RELEASES_BUCKET",
+    "CMS_PUBLIC_ASSETS_URL",
+    "CMS_PUBLIC_RELEASES_URL",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_OAUTH_CLIENT_ID",
+    "GITHUB_OAUTH_CLIENT_SECRET",
+    "GITHUB_WEBHOOK_SECRET"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
