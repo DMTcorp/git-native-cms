@@ -32,4 +32,6 @@ private because it contains audit, idempotency, webhook replay, one-time confirm
 distributed rate-limit records.
 
 The Vercel configs add CSP, HSTS, `nosniff`, frame, referrer, permissions, COOP and CORP headers.
-Run unit security tests, MinIO/R2 contracts, three-browser E2E and axe WCAG checks before release.
+Run unit security tests, the production dependency audit, MinIO/R2 contracts, three-browser E2E
+and axe WCAG checks before release. The scheduled security workflow also runs CodeQL and emits an
+SPDX SBOM.
