@@ -125,7 +125,11 @@ test("editor shell matches light and dark visual baselines", async ({ page, brow
   test.skip(browserName !== "chromium", "Chromium is the canonical visual regression renderer.");
   await page.goto("/cms");
   const editor = page.locator(".cms-app");
-  await expect(page.locator("[data-cms-hydrated='true']")).toBeVisible();
+  await expect(page.locator("[data-cms-hydrated='true']")).toHaveAttribute(
+    "data-cms-preview-connected",
+    "true",
+  );
+  await Promise.all(page.frames().map((frame) => frame.evaluate(() => document.fonts.ready)));
   await expect(editor).toHaveScreenshot("editor-light.png", {
     animations: "disabled",
     caret: "hide",

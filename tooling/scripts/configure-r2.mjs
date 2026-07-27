@@ -79,11 +79,10 @@ function smokeTest(accessKeyId, secretAccessKey) {
   }
 }
 
-async function verifyBucketsAndConfigureCors(accessKeyId, secretAccessKey) {
+async function verifyBucketObjectAccess(accessKeyId, secretAccessKey) {
   const {
     DeleteObjectCommand,
     GetObjectCommand,
-    PutBucketCorsCommand,
     PutObjectCommand,
     S3Client,
   } = await import("@aws-sdk/client-s3");
@@ -95,39 +94,25 @@ async function verifyBucketsAndConfigureCors(accessKeyId, secretAccessKey) {
   const key = `health/configuration-${randomBytes(12).toString("hex")}.txt`;
   try {
     for (const bucket of [assetsBucket, releasesBucket, stateBucket]) {
-      await client.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: key,
-          Body: "git-native-cms-r2-configuration-check",
-          ContentType: "text/plain; charset=utf-8",
-        }),
-      );
-      const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-      if ((await object.Body?.transformToString()) !== "git-native-cms-r2-configuration-check") {
-        throw new Error(`R2 verification failed for ${bucket}.`);
+      try {
+        await client.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: "git-native-cms-r2-configuration-check",
+            ContentType: "text/plain; charset=utf-8",
+          }),
+        );
+        const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+        if ((await object.Body?.transformToString()) !== "git-native-cms-r2-configuration-check") {
+          throw new Error("The verification object did not round-trip.");
+        }
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown R2 error";
+        throw new Error(`R2 object access failed for ${bucket}: ${message}`, { cause: error });
       }
-      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
     }
-    await client.send(
-      new PutBucketCorsCommand({
-        Bucket: assetsBucket,
-        CORSConfiguration: {
-          CORSRules: [
-            {
-              AllowedOrigins: [
-                "https://git-native-cms-next.vercel.app",
-                "https://git-native-cms-astro.vercel.app",
-              ],
-              AllowedMethods: ["PUT", "HEAD"],
-              AllowedHeaders: ["content-type", "x-amz-*"],
-              ExposeHeaders: ["etag"],
-              MaxAgeSeconds: 3600,
-            },
-          ],
-        },
-      }),
-    );
   } finally {
     client.destroy();
   }
@@ -209,7 +194,7 @@ const server = createServer(async (request, response) => {
       }
 
       smokeTest(accessKeyId, secretAccessKey);
-      await verifyBucketsAndConfigureCors(accessKeyId, secretAccessKey);
+      await verifyBucketObjectAccess(accessKeyId, secretAccessKey);
       const environment = {
         CMS_S3_ENDPOINT: endpoint,
         CMS_S3_REGION: "auto",
