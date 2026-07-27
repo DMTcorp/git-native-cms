@@ -20,6 +20,7 @@ const secret =
   secretPath === undefined
     ? required(process.env.CMS_SESSION_SECRET, "CMS_SESSION_SECRET")
     : required((await readFile(secretPath, "utf8")).trim(), "session secret file");
+const registryDigest = required(process.env.CMS_REGISTRY_DIGEST, "CMS_REGISTRY_DIGEST");
 
 const refResponse = await fetch(
   `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/git/ref/heads/main`,
@@ -56,22 +57,25 @@ const response = await fetch(`${origin}/api/cms/releases/build-and-publish`, {
     expectedRevision: mainRevision,
     environment: "production",
     configVersion: 1,
-    registryDigest: "sha256:sandbox-registry-v1",
+    registryDigest,
     schemaVersion: 1,
     idempotencyKey,
   }),
   redirect: "error",
 });
 const envelope = (await response.json()) as {
+  readonly error?: { readonly code?: string; readonly message?: string };
   readonly payload?: {
     readonly releaseId?: string;
-    readonly error?: { readonly message?: string };
+    readonly error?: { readonly code?: string; readonly message?: string };
   };
 };
 if (!response.ok || envelope.payload?.releaseId === undefined) {
+  const error = envelope.error ?? envelope.payload?.error;
   throw new Error(
-    envelope.payload?.error?.message ??
-      `CMS release bootstrap failed with status ${response.status}.`,
+    error === undefined
+      ? `CMS release bootstrap failed with status ${response.status}.`
+      : `${error.code ?? "CMS_UNKNOWN"}: ${error.message ?? "Release bootstrap failed."}`,
   );
 }
 process.stdout.write(`Published ${envelope.payload.releaseId} from ${mainRevision}.\n`);

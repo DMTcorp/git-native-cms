@@ -35,6 +35,11 @@ export const sandboxChange: Change = {
 export const sandboxDocument: ContentDocument<{
   readonly title: string;
   readonly route: { readonly path: string };
+  readonly redirectFrom: readonly string[];
+  readonly seo: { readonly title: string; readonly description: string };
+  readonly locales: Readonly<
+    Record<string, { readonly status: string; readonly fields: Readonly<Record<string, string>> }>
+  >;
   readonly sections: readonly {
     readonly id: string;
     readonly type: string;
@@ -50,6 +55,25 @@ export const sandboxDocument: ContentDocument<{
   data: {
     title: "Homepage",
     route: { path: "/" },
+    redirectFrom: ["/welcome"],
+    seo: {
+      title: "Fieldnotes · Git-native CMS",
+      description: "A live Next.js demonstration of Git-native visual publishing.",
+    },
+    locales: {
+      "pl-PL": {
+        status: "translated",
+        fields: {
+          "/title": "Strona główna",
+          "/sections/0/heading": "Praca redakcyjna bez widocznej maszynerii.",
+          "/sections/0/description":
+            "Buduj strony z prawdziwych komponentów i publikuj niezmienne wydania.",
+          "/sections/1/heading": "Jasna droga do publikacji",
+          "/sections/1/description":
+            "Każda zmiana przechodzi przez przegląd i staging przed publikacją.",
+        },
+      },
+    },
     sections: [
       {
         id: "sec_hero",

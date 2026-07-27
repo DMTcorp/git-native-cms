@@ -1,4 +1,5 @@
-import type { EnvironmentPointer, StoredRelease } from "@git-native-cms/application";
+import { contractPassed, ReleaseStoreContract } from "@git-native-cms/adapter-kit";
+import type { StoredRelease } from "@git-native-cms/application";
 import type { ReleaseId } from "@git-native-cms/core";
 import { CreateBucketCommand, DeleteBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -51,21 +52,22 @@ describe.skipIf(!runContainerTests)("S3 release contract", () => {
         "pages/home.json": '{"title":"Home"}',
       },
     };
-    await store.writeRelease(release);
-    await expect(store.writeRelease(release)).resolves.toBeUndefined();
-    await expect(store.readRelease(release.id)).resolves.toEqual(release);
-    const first: EnvironmentPointer = {
-      environment: "production",
-      releaseId: release.id,
-      revision: "pointer-1",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    };
-    await expect(store.compareAndSwapPointer({ next: first })).resolves.toEqual(first);
-    await expect(
-      store.compareAndSwapPointer({
-        next: { ...first, revision: "pointer-2" },
-        expectedRevision: "stale",
-      }),
-    ).rejects.toMatchObject({ code: "CMS_STORAGE_009" });
+    const results = await ReleaseStoreContract({
+      store,
+      release,
+      pointer: {
+        environment: "production",
+        releaseId: release.id,
+        revision: "pointer-1",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    expect(
+      contractPassed(results),
+      results
+        .filter((result) => !result.passed)
+        .map((result) => `${result.name}: ${result.details ?? "failed"}`)
+        .join("\n"),
+    ).toBe(true);
   });
 });

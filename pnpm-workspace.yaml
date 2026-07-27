@@ -12,6 +12,9 @@ allowBuilds:
 catalog:
   "@aws-sdk/client-s3": "latest"
   "@aws-sdk/s3-request-presigner": "latest"
+  "@dnd-kit/core": "latest"
+  "@dnd-kit/sortable": "latest"
+  "@dnd-kit/utilities": "latest"
   "@modelcontextprotocol/sdk": "latest"
   "@octokit/app": "latest"
   "@octokit/core": "latest"
@@ -24,5 +27,6 @@ catalog:
   "jose": "latest"
   "react": "latest"
   "react-dom": "latest"
+  "testcontainers": "latest"
   "yaml": "latest"
 confirmModulesPurge: false

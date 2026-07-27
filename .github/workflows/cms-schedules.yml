@@ -1,0 +1,30 @@
+name: CMS schedule executor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cms-schedule-executor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute due schedules
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "authorization: Bearer $CMS_SCHEDULE_TOKEN" \
+            --header "content-type: application/json" \
+            --header "idempotency-key: schedule-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --data '{"configVersion":1,"schemaVersion":1}' \
+            "$CMS_SCHEDULE_ENDPOINT"
+        env:
+          CMS_SCHEDULE_ENDPOINT: ${{ secrets.CMS_SCHEDULE_ENDPOINT }}
+          CMS_SCHEDULE_TOKEN: ${{ secrets.CMS_SCHEDULE_TOKEN }}

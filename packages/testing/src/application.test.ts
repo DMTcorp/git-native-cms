@@ -1,4 +1,5 @@
 import { yamlCodec } from "@git-native-cms/content-codecs";
+import { GitContentRepository } from "@git-native-cms/content-repository";
 import type { DocumentId, ReleaseId, Revision } from "@git-native-cms/core";
 import { contentPath } from "@git-native-cms/document-model";
 import {
@@ -7,6 +8,7 @@ import {
   type ReleaseBuilderPort,
   type ReleaseStore,
   type StoredRelease,
+  type TranslationProvider,
 } from "@git-native-cms/application";
 import { AuthorizationService } from "@git-native-cms/permissions";
 import { describe, expect, it } from "vitest";
@@ -19,6 +21,13 @@ import {
   MemoryIdempotencyStore,
   testActor,
 } from "./index.js";
+
+const reviewer = {
+  ...testActor,
+  id: "actor_reviewer" as typeof testActor.id,
+  login: "reviewer",
+  displayName: "Review Editor",
+};
 
 function fixture() {
   const git = new MemoryGitProvider();
@@ -47,6 +56,10 @@ class TestReleaseStore implements ReleaseStore {
   async readRelease(id: ReleaseId): Promise<StoredRelease | undefined> {
     const release = this.releases.get(id);
     return release === undefined ? undefined : structuredClone(release);
+  }
+
+  async listReleases(): Promise<{ readonly items: readonly StoredRelease[] }> {
+    return { items: [...this.releases.values()].map((release) => structuredClone(release)) };
   }
 
   async readPointer(
@@ -146,6 +159,175 @@ describe("application commands", () => {
     expect(result.data).toEqual({ title: "Welcome" });
   });
 
+  it("creates, translates, and safely deletes generic content through application commands", async () => {
+    const { application, content } = fixture();
+    const context = { actor: testActor, requestId: "req_documents" };
+    const change = await application.createChange.execute(
+      { name: "Localized collection", idempotencyKey: "documents:create-change" },
+      context,
+    );
+    const revision = "sha_content_1" as Revision;
+    const created = await application.createDocument.execute(
+      {
+        change,
+        type: "posts",
+        schemaVersion: 1,
+        data: { title: "Release notes", slug: "release-notes", sections: [] },
+        expectedRevision: revision,
+        idempotencyKey: "documents:create",
+      },
+      context,
+    );
+    expect(created.id).toMatch(/^doc_/u);
+    const translated = await application.importTranslation.execute(
+      {
+        change,
+        documentId: created.id,
+        targetLocale: "pl-PL",
+        xliff:
+          '<?xml version="1.0"?><xliff version="2.1" srcLang="en-US" trgLang="pl-PL"><file id="content"><unit id="/title"><segment><source>Release notes</source><target>Informacje o wydaniu</target></segment></unit></file></xliff>',
+        expectedRevision: created.revision,
+        idempotencyKey: "documents:translate",
+      },
+      context,
+    );
+    expect(translated.data).toMatchObject({
+      locales: {
+        "pl-PL": {
+          status: "translated",
+          fields: { "/title": "Informacje o wydaniu" },
+        },
+      },
+    });
+    const deleted = await application.deleteDocument.execute(
+      {
+        change,
+        documentId: created.id,
+        expectedRevision: translated.revision,
+        idempotencyKey: "documents:delete",
+      },
+      context,
+    );
+    expect(deleted.documentId).toBe(created.id);
+    await expect(
+      content.readDocument({ ref: change.branchName, documentId: created.id }),
+    ).rejects.toThrow();
+  });
+
+  it("stores an idempotent future schedule and generated workflow on the Change", async () => {
+    const git = new MemoryGitProvider();
+    const content = new MemoryContentRepository();
+    const application = createCmsApplication({
+      git,
+      content,
+      authorization: new AuthorizationService(),
+      clock: new FixedClock(),
+      ids: new DeterministicIds(),
+      idempotency: new MemoryIdempotencyStore(),
+      audit: new MemoryAuditSink(),
+      scheduler: {
+        workflow: (input) => ({
+          path: `.github/workflows/${input.scheduleId}.yml`,
+          content: `name: ${input.scheduleId}\n`,
+        }),
+      },
+    });
+    const context = { actor: testActor, requestId: "req_schedule" };
+    const change = await application.createChange.execute(
+      { name: "Timed launch", idempotencyKey: "schedule:change" },
+      context,
+    );
+    const current = await git.resolveRef(change.branchName);
+    const first = await application.scheduleContent.execute(
+      {
+        change,
+        action: "publish",
+        documentIds: ["doc_home" as DocumentId],
+        executeAt: "2026-07-28T08:00:00.000Z",
+        expectedRevision: current.sha,
+        idempotencyKey: "schedule:create",
+      },
+      context,
+    );
+    const second = await application.scheduleContent.execute(
+      {
+        change,
+        action: "publish",
+        documentIds: ["doc_home" as DocumentId],
+        executeAt: "2026-07-28T08:00:00.000Z",
+        expectedRevision: current.sha,
+        idempotencyKey: "schedule:create",
+      },
+      context,
+    );
+    expect(second).toEqual(first);
+    expect(
+      await git.readFile({
+        ref: change.branchName,
+        path: `.cms/schedules/${first.schedule.id}.yaml`,
+      }),
+    ).toBeDefined();
+  });
+
+  it("removes scheduled content before publishing an unpublish release", async () => {
+    const scheduleId = "sch_unpublish_due";
+    const documentId = "doc_scheduled_page" as DocumentId;
+    const executeAt = "2026-07-27T11:00:00.000Z";
+    const git = new MemoryGitProvider({
+      "content/pages/scheduled/index.yaml": yamlCodec.serialize({
+        id: documentId,
+        type: "pages",
+        schemaVersion: 1,
+        title: "Scheduled page",
+        slug: "scheduled",
+        sections: [],
+      }),
+      [`.cms/schedules/${scheduleId}.yaml`]: yamlCodec.serialize({
+        id: scheduleId,
+        changeId: "chg_scheduled_unpublish",
+        action: "unpublish",
+        documentIds: [documentId],
+        executeAt,
+        status: "scheduled",
+        createdBy: testActor.id,
+        createdAt: "2026-07-27T10:00:00.000Z",
+      }),
+    });
+    const content = new GitContentRepository(git);
+    const releaseStore = new TestReleaseStore();
+    const application = createCmsApplication({
+      git,
+      content,
+      authorization: new AuthorizationService(),
+      clock: new FixedClock(),
+      ids: new DeterministicIds(),
+      idempotency: new MemoryIdempotencyStore(),
+      audit: new MemoryAuditSink(),
+      releaseStore,
+      releaseBuilder: testReleaseBuilder,
+    });
+
+    await expect(
+      application.executeSchedule.execute(
+        {
+          scheduleId,
+          expectedAt: executeAt,
+          configVersion: 1,
+          registryDigest: `sha256:${"a".repeat(64)}`,
+          schemaVersion: 1,
+          idempotencyKey: "schedule:execute-unpublish",
+        },
+        { actor: testActor, requestId: "req_schedule_unpublish" },
+      ),
+    ).resolves.toMatchObject({ status: "executed" });
+    await expect(content.readDocument({ ref: "main", documentId })).rejects.toMatchObject({
+      code: "CMS_DOCUMENT_404",
+    });
+    expect(
+      [...releaseStore.releases.values()][0]?.files["content/pages/scheduled/index.json"],
+    ).toBeUndefined();
+  });
+
   it("moves a Change through review and staging into an immutable production release", async () => {
     const git = new MemoryGitProvider();
     const content = new MemoryContentRepository();
@@ -180,6 +362,17 @@ describe("application commands", () => {
       status: "in_review",
       pullRequestNumber: 1,
     });
+    await expect(
+      application.approveChange.execute(
+        {
+          change: submitted.change,
+          pullRequestNumber: submitted.pullRequest?.number ?? 0,
+          expectedRevision: submitted.revision,
+          idempotencyKey: "workflow:self-approve",
+        },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: "CMS_REVIEW_009" });
     const approved = await application.approveChange.execute(
       {
         change: submitted.change,
@@ -187,7 +380,7 @@ describe("application commands", () => {
         expectedRevision: submitted.revision,
         idempotencyKey: "workflow:approve",
       },
-      context,
+      { ...context, actor: reviewer },
     );
     expect(approved.change.status).toBe("approved");
     const staged = await application.addChangeToStaging.execute(
@@ -197,7 +390,7 @@ describe("application commands", () => {
         expectedRevision: approved.revision,
         idempotencyKey: "workflow:stage",
       },
-      context,
+      { ...context, actor: reviewer },
     );
     expect(staged.change.status).toBe("staging");
 
@@ -220,7 +413,7 @@ describe("application commands", () => {
         schemaVersion: 1,
         idempotencyKey: "workflow:publish",
       },
-      context,
+      { ...context, actor: reviewer },
     );
     expect(published.release.id).toBe("rel_test_workflow");
     expect(await releaseStore.readPointer("production")).toMatchObject({
@@ -248,5 +441,119 @@ describe("application commands", () => {
       "staging.promoted",
       "release.built-and-published",
     ]);
+  });
+
+  it("retries deployment notification after the release pointer already switched", async () => {
+    const git = new MemoryGitProvider();
+    const content = new MemoryContentRepository();
+    const releaseStore = new TestReleaseStore();
+    let notifications = 0;
+    const application = createCmsApplication({
+      git,
+      content,
+      authorization: new AuthorizationService(),
+      clock: new FixedClock(),
+      ids: new DeterministicIds(),
+      idempotency: new MemoryIdempotencyStore(),
+      audit: new MemoryAuditSink(),
+      releaseStore,
+      releaseBuilder: testReleaseBuilder,
+      publicationNotifier: {
+        async notify() {
+          notifications += 1;
+          if (notifications === 1) throw new Error("temporary deployment outage");
+        },
+      },
+    });
+    const main = await git.resolveRef("main");
+    content.seed("main", {
+      id: "doc_home" as DocumentId,
+      type: "pages",
+      schemaVersion: 1,
+      revision: main.sha,
+      data: { title: "Retry-safe release", sections: [] },
+    });
+    const command = {
+      ref: "main",
+      expectedRevision: main.sha,
+      environment: "production" as const,
+      configVersion: 1,
+      registryDigest: "sha256:retry",
+      schemaVersion: 1,
+      idempotencyKey: "release:retry-notification",
+    };
+    const context = { actor: testActor, requestId: "req_release_retry" };
+    await expect(application.buildAndPublishRelease.execute(command, context)).rejects.toThrow(
+      "temporary deployment outage",
+    );
+    await expect(
+      application.buildAndPublishRelease.execute(command, context),
+    ).resolves.toMatchObject({ id: "rel_test_workflow" });
+    expect(notifications).toBe(2);
+    expect(await releaseStore.readPointer("production")).toMatchObject({
+      releaseId: "rel_test_workflow",
+    });
+  });
+
+  it("creates idempotent translation jobs and exposes provider status through application", async () => {
+    const git = new MemoryGitProvider();
+    const content = new MemoryContentRepository();
+    const audit = new MemoryAuditSink();
+    let createdJobs = 0;
+    const translationProvider: TranslationProvider = {
+      async createJob() {
+        createdJobs += 1;
+        return { jobId: "job-translation-1" };
+      },
+      async readJob() {
+        return { status: "complete", xliff: '<xliff version="2.0"/>' };
+      },
+    };
+    const application = createCmsApplication({
+      git,
+      content,
+      authorization: new AuthorizationService(),
+      clock: new FixedClock(),
+      ids: new DeterministicIds(),
+      idempotency: new MemoryIdempotencyStore(),
+      audit,
+      translationProvider,
+    });
+    const context = { actor: testActor, requestId: "req_translation" };
+    const change = await application.createChange.execute(
+      { name: "Translate homepage", idempotencyKey: "translation-change" },
+      context,
+    );
+    const documentId = "doc_translation" as DocumentId;
+    content.seed(change.branchName, {
+      id: documentId,
+      type: "pages",
+      schemaVersion: 1,
+      revision: change.baseCommit,
+      data: { title: "Homepage", sections: [] },
+    });
+    const command = {
+      change,
+      documentId,
+      sourceLocale: "en-US",
+      targetLocale: "pl-PL",
+      xliff: '<xliff version="2.0"/>',
+      expectedRevision: change.baseCommit,
+      idempotencyKey: "translation-job-1",
+    };
+    await expect(application.createTranslationJob.execute(command, context)).resolves.toEqual({
+      jobId: "job-translation-1",
+    });
+    await expect(application.createTranslationJob.execute(command, context)).resolves.toEqual({
+      jobId: "job-translation-1",
+    });
+    expect(createdJobs).toBe(1);
+    await expect(
+      application.readTranslationJob.execute({ change, jobId: "job-translation-1" }, context),
+    ).resolves.toEqual({
+      status: "complete",
+      xliff: '<xliff version="2.0"/>',
+    });
+    expect(audit.events.map((event) => event.type)).toContain("translation.job-created");
   });
 });

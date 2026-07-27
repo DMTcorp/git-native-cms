@@ -34,6 +34,7 @@ export interface CmsMcpContext {
   readonly queries: CmsMcpQueries;
   readonly confirmation: ConfirmationService;
   readonly request: RequestContext;
+  readonly registryDigest: string;
 }
 
 export interface McpToolDefinition {
@@ -99,6 +100,35 @@ export const cmsTools: readonly McpToolDefinition[] = [
     ),
   },
   {
+    name: "create_document",
+    description: "Create a typed content document inside a Change.",
+    inputSchema: objectSchema(
+      {
+        changeId: { type: "string" },
+        type: { type: "string" },
+        schemaVersion: { type: "integer", minimum: 1 },
+        data: { type: "object" },
+        expectedRevision: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      ["changeId", "type", "schemaVersion", "data", "expectedRevision", "idempotencyKey"],
+    ),
+  },
+  {
+    name: "delete_document",
+    description: "Delete a draft document after normal reference and permission checks.",
+    inputSchema: objectSchema(
+      {
+        changeId: { type: "string" },
+        documentId: { type: "string" },
+        expectedRevision: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      ["changeId", "documentId", "expectedRevision", "idempotencyKey"],
+    ),
+    destructive: true,
+  },
+  {
     name: "submit_for_review",
     description: "Send a Change for review.",
     inputSchema: objectSchema(
@@ -114,6 +144,62 @@ export const cmsTools: readonly McpToolDefinition[] = [
     name: "get_preview",
     description: "Get a preview URL for a Change without publishing it.",
     inputSchema: objectSchema({ changeId: { type: "string" } }, ["changeId"]),
+  },
+  {
+    name: "request_changes",
+    description: "Return a reviewed Change to its editor with an audit comment.",
+    inputSchema: objectSchema(
+      {
+        changeId: { type: "string" },
+        pullRequestNumber: { type: "integer", minimum: 1 },
+        expectedRevision: { type: "string" },
+        body: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      ["changeId", "pullRequestNumber", "expectedRevision", "body", "idempotencyKey"],
+    ),
+  },
+  {
+    name: "approve_change",
+    description: "Approve a reviewed Change. Normal reviewer permission is required.",
+    inputSchema: objectSchema(
+      {
+        changeId: { type: "string" },
+        pullRequestNumber: { type: "integer", minimum: 1 },
+        expectedRevision: { type: "string" },
+        body: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      ["changeId", "pullRequestNumber", "expectedRevision", "idempotencyKey"],
+    ),
+  },
+  {
+    name: "add_to_staging",
+    description: "Squash an approved Change into Staging after checks and conflict validation.",
+    inputSchema: objectSchema(
+      {
+        changeId: { type: "string" },
+        pullRequestNumber: { type: "integer", minimum: 1 },
+        expectedRevision: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      ["changeId", "pullRequestNumber", "expectedRevision", "idempotencyKey"],
+    ),
+  },
+  {
+    name: "schedule_content",
+    description: "Schedule publish or unpublish through the shared scheduler command.",
+    inputSchema: objectSchema(
+      {
+        changeId: { type: "string" },
+        action: { type: "string", enum: ["publish", "unpublish"] },
+        documentIds: { type: "array", items: { type: "string" }, minItems: 1 },
+        executeAt: { type: "string" },
+        expectedRevision: { type: "string" },
+        idempotencyKey: { type: "string" },
+      },
+      ["changeId", "action", "documentIds", "executeAt", "expectedRevision", "idempotencyKey"],
+    ),
   },
   {
     name: "publish_staging",
@@ -158,6 +244,13 @@ function inputRecord(value: unknown): Record<string, unknown> {
 function string(value: unknown, name: string): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${name} is required.`);
   return value;
+}
+
+function positiveInteger(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return Number(value);
 }
 
 export async function callCmsTool(
@@ -209,6 +302,46 @@ export async function callCmsTool(
         ),
       };
     }
+    case "create_document": {
+      const change = await context.queries.getChange(
+        string(input.changeId, "changeId"),
+        context.request,
+      );
+      return {
+        document: await context.application.createDocument.execute(
+          {
+            change,
+            type: string(input.type, "type"),
+            schemaVersion: positiveInteger(input.schemaVersion, "schemaVersion"),
+            data: input.data ?? {},
+            expectedRevision: string(
+              input.expectedRevision,
+              "expectedRevision",
+            ) as Change["baseCommit"],
+            idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
+          },
+          context.request,
+        ),
+      };
+    }
+    case "delete_document": {
+      const change = await context.queries.getChange(
+        string(input.changeId, "changeId"),
+        context.request,
+      );
+      return context.application.deleteDocument.execute(
+        {
+          change,
+          documentId: string(input.documentId, "documentId") as DocumentId,
+          expectedRevision: string(
+            input.expectedRevision,
+            "expectedRevision",
+          ) as Change["baseCommit"],
+          idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
+        },
+        context.request,
+      );
+    }
     case "submit_for_review": {
       const change = await context.queries.getChange(
         string(input.changeId, "changeId"),
@@ -234,6 +367,66 @@ export async function callCmsTool(
         url: await context.queries.previewUrl(string(input.changeId, "changeId"), context.request),
       };
     }
+    case "request_changes":
+    case "approve_change":
+    case "add_to_staging": {
+      const change = await context.queries.getChange(
+        string(input.changeId, "changeId"),
+        context.request,
+      );
+      const shared = {
+        change,
+        pullRequestNumber: positiveInteger(input.pullRequestNumber, "pullRequestNumber"),
+        expectedRevision: string(
+          input.expectedRevision,
+          "expectedRevision",
+        ) as Change["baseCommit"],
+        idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
+      };
+      if (name === "request_changes") {
+        return context.application.requestChanges.execute(
+          { ...shared, body: string(input.body, "body") },
+          context.request,
+        );
+      }
+      if (name === "approve_change") {
+        return context.application.approveChange.execute(
+          {
+            ...shared,
+            ...(typeof input.body === "string" ? { body: input.body } : {}),
+          },
+          context.request,
+        );
+      }
+      return context.application.addChangeToStaging.execute(shared, context.request);
+    }
+    case "schedule_content": {
+      const change = await context.queries.getChange(
+        string(input.changeId, "changeId"),
+        context.request,
+      );
+      const action = string(input.action, "action");
+      if (action !== "publish" && action !== "unpublish") {
+        throw new Error("action must be publish or unpublish.");
+      }
+      const documentIds = Array.isArray(input.documentIds)
+        ? input.documentIds.map((value) => string(value, "documentId") as DocumentId)
+        : [];
+      return context.application.scheduleContent.execute(
+        {
+          change,
+          action,
+          documentIds,
+          executeAt: string(input.executeAt, "executeAt"),
+          expectedRevision: string(
+            input.expectedRevision,
+            "expectedRevision",
+          ) as Change["baseCommit"],
+          idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
+        },
+        context.request,
+      );
+    }
     case "publish_staging": {
       const confirmed = await context.confirmation.verify({
         token: typeof input.confirmationToken === "string" ? input.confirmationToken : undefined,
@@ -241,13 +434,16 @@ export async function callCmsTool(
         actorId: context.request.actor.id,
       });
       if (!confirmed) throw new Error("A valid publication confirmation token is required.");
-      return context.application.promoteStaging.execute(
+      return context.application.publishStaging.execute(
         {
-          expectedRevision: string(
+          expectedStagingRevision: string(
             input.expectedRevision,
             "expectedRevision",
           ) as Change["baseCommit"],
           title: string(input.title, "title"),
+          configVersion: 1,
+          registryDigest: context.registryDigest,
+          schemaVersion: 1,
           idempotencyKey: string(input.idempotencyKey, "idempotencyKey"),
         },
         context.request,
@@ -294,7 +490,7 @@ export async function handleMcpJsonRpc(
       case "initialize":
         result = {
           protocolVersion: "2025-03-26",
-          capabilities: { tools: {}, resources: {} },
+          capabilities: { tools: {}, resources: {}, prompts: {} },
           serverInfo: { name: "git-native-cms", version: "0.1.0" },
         };
         break;
@@ -339,6 +535,60 @@ export async function handleMcpJsonRpc(
         result = {
           contents: [{ uri, mimeType: "application/json", text: JSON.stringify(value, null, 2) }],
         };
+        break;
+      }
+      case "prompts/list":
+        result = {
+          prompts: [
+            {
+              name: "prepare_editorial_change",
+              description: "Plan a safe editorial Change without publishing it.",
+              arguments: [
+                { name: "goal", description: "Editorial outcome", required: true },
+                { name: "locale", description: "Target locale", required: false },
+              ],
+            },
+            {
+              name: "review_change",
+              description: "Review content differences, checks and publication risk.",
+              arguments: [{ name: "changeId", description: "Change identifier", required: true }],
+            },
+          ],
+        };
+        break;
+      case "prompts/get": {
+        const params = inputRecord(request.params);
+        const name = string(params.name, "name");
+        const argumentsValue = inputRecord(params.arguments);
+        if (name === "prepare_editorial_change") {
+          result = {
+            description: "Prepare an isolated, reviewable editorial Change.",
+            messages: [
+              {
+                role: "user",
+                content: {
+                  type: "text",
+                  text: `Prepare a Change for: ${string(argumentsValue.goal, "goal")}. Use locale ${typeof argumentsValue.locale === "string" ? argumentsValue.locale : "en-US"}. Do not publish.`,
+                },
+              },
+            ],
+          };
+        } else if (name === "review_change") {
+          result = {
+            description: "Review a Change without mutating it.",
+            messages: [
+              {
+                role: "user",
+                content: {
+                  type: "text",
+                  text: `Review Change ${string(argumentsValue.changeId, "changeId")}. Summarize semantic risk and checks. Do not approve or publish.`,
+                },
+              },
+            ],
+          };
+        } else {
+          throw new Error(`Unknown CMS prompt "${name}".`);
+        }
         break;
       }
       default:

@@ -138,6 +138,28 @@ body {
   letter-spacing: -0.035em;
 }
 
+.pricing-grid__items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.pricing-grid__items article {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #cbd3dc;
+  border-radius: 12px;
+  padding: 22px;
+  background: white;
+}
+
+.pricing-grid__items article span {
+  color: #147a5a;
+  font:
+    700 13px/1 "IBM Plex Mono",
+    monospace;
+}
+
 @media (max-width: 800px) {
   .hero {
     grid-template-columns: 1fr;

@@ -19,6 +19,9 @@
     "@git-native-cms/content-codecs": "workspace:*",
     "@git-native-cms/core": "workspace:*"
   },
+  "devDependencies": {
+    "@git-native-cms/adapter-kit": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"

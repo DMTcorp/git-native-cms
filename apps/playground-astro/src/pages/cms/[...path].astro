@@ -3,7 +3,7 @@ import "@git-native-cms/editor-ui/styles.css";
 import { hostedRuntime } from "../../cms-runtime";
 import { CmsDemo } from "../../components/CmsDemo";
 
-const state = await hostedRuntime.editorState(Astro.request);
+const state = await hostedRuntime.editorState(Astro.request, Astro.params.path ?? "");
 ---
 
 <html lang="en">

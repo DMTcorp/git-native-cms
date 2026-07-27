@@ -4,6 +4,8 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -25,7 +27,74 @@ interface PendingUpload {
   readonly fileName: string;
   readonly mimeType: string;
   readonly size: number;
+  readonly checksum: string;
   readonly createdAt: number;
+}
+
+interface ListedObject {
+  readonly Key?: string | undefined;
+  readonly Size?: number | undefined;
+}
+
+function publicAssetUrl(options: S3AssetStoreOptions, key: string): string {
+  return `${options.publicBaseUrl.replace(/\/$/u, "")}/${key}`;
+}
+
+async function materializeAsset(
+  options: S3AssetStoreOptions,
+  checksum: string,
+  original: ListedObject & { readonly Key: string },
+  objects: readonly ListedObject[],
+  signal?: AbortSignal,
+): Promise<Asset> {
+  const head = await options.client.send(
+    new HeadObjectCommand({ Bucket: options.bucket, Key: original.Key }),
+    signal === undefined ? undefined : { abortSignal: signal },
+  );
+  const variants = await Promise.all(
+    objects
+      .filter(
+        (object): object is ListedObject & { readonly Key: string } =>
+          object.Key?.startsWith(`assets/${checksum}/variants/`) === true,
+      )
+      .map(async (object) => {
+        const variantHead = await options.client.send(
+          new HeadObjectCommand({ Bucket: options.bucket, Key: object.Key }),
+          signal === undefined ? undefined : { abortSignal: signal },
+        );
+        const fileName = object.Key.split("/").at(-1) ?? "";
+        const parsedWidth = Number.parseInt(fileName.split(".")[0] ?? "", 10);
+        const width = Number(variantHead.Metadata?.width ?? parsedWidth);
+        const height = Number(variantHead.Metadata?.height ?? width);
+        const format =
+          variantHead.Metadata?.format ??
+          variantHead.ContentType?.replace(/^image\//u, "") ??
+          fileName.split(".").at(-1) ??
+          "unknown";
+        return {
+          width: Number.isFinite(width) ? width : 0,
+          height: Number.isFinite(height) ? height : 0,
+          format,
+          url: publicAssetUrl(options, object.Key),
+        };
+      }),
+  );
+  const fileName = head.Metadata?.originalfilename ?? original.Key.split("/").at(-1) ?? "asset";
+  return {
+    id: `ast_${checksum.slice(0, 24)}` as AssetId,
+    fileName,
+    mimeType: head.ContentType ?? "application/octet-stream",
+    size: head.ContentLength ?? original.Size ?? 0,
+    checksum,
+    url: publicAssetUrl(options, original.Key),
+    ...(variants.length === 0
+      ? {}
+      : {
+          variants: variants.sort(
+            (left, right) => left.width - right.width || left.format.localeCompare(right.format),
+          ),
+        }),
+  };
 }
 
 function safeFileName(value: string): string {
@@ -36,6 +105,67 @@ function safeFileName(value: string): string {
   return normalized.length === 0 || normalized === "." || normalized === ".."
     ? "asset"
     : normalized;
+}
+
+function normalizedChecksum(value: string): string {
+  if (!/^[a-f0-9]{64}$/iu.test(value)) {
+    throw new CmsError({
+      code: "CMS_ASSET_004",
+      message: "A SHA-256 checksum is required for an upload.",
+      category: "validation",
+      retryable: false,
+    });
+  }
+  return value.toLowerCase();
+}
+
+async function uploadedObject(
+  body: { transformToByteArray(): Promise<Uint8Array> } | undefined,
+): Promise<{ readonly bytes: Uint8Array; readonly checksum: string }> {
+  if (body === undefined) {
+    throw new CmsError({
+      code: "CMS_ASSET_003",
+      message: "The uploaded object body is missing.",
+      category: "storage",
+      retryable: true,
+    });
+  }
+  const bytes = await body.transformToByteArray();
+  const digestInput = new Uint8Array(bytes.byteLength);
+  digestInput.set(bytes);
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", digestInput));
+  return {
+    bytes,
+    checksum: [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+  };
+}
+
+function ascii(bytes: Uint8Array, start: number, end: number): string {
+  return String.fromCharCode(...bytes.slice(start, end));
+}
+
+export function assetBytesMatchMime(bytes: Uint8Array, mimeType: string): boolean {
+  switch (mimeType) {
+    case "image/jpeg":
+      return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    case "image/png":
+      return (
+        bytes[0] === 0x89 &&
+        ascii(bytes, 1, 4) === "PNG" &&
+        bytes[4] === 0x0d &&
+        bytes[5] === 0x0a &&
+        bytes[6] === 0x1a &&
+        bytes[7] === 0x0a
+      );
+    case "image/webp":
+      return ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 12) === "WEBP";
+    case "image/avif":
+      return ascii(bytes, 4, 8) === "ftyp" && ["avif", "avis"].includes(ascii(bytes, 8, 12));
+    case "application/pdf":
+      return ascii(bytes, 0, 5) === "%PDF-";
+    default:
+      return false;
+  }
 }
 
 function validateUpload(
@@ -78,6 +208,7 @@ export class S3AssetStore implements AssetStore {
     readonly headers: Record<string, string>;
   }> {
     validateUpload(input, this.options);
+    const checksum = normalizedChecksum(input.checksum);
     const uploadId = `upl_${globalThis.crypto.randomUUID()}`;
     const fileName = safeFileName(input.fileName);
     const key = `uploads/${uploadId}/${fileName}`;
@@ -86,7 +217,14 @@ export class S3AssetStore implements AssetStore {
       Key: key,
       ContentType: input.mimeType,
       ContentLength: input.size,
-      Metadata: { uploadId, actorId: input.actor.id },
+      Metadata: {
+        uploadId,
+        actorId: input.actor.id,
+        declaredSize: String(input.size),
+        declaredMime: input.mimeType,
+        declaredSha256: checksum,
+        originalFileName: fileName,
+      },
     });
     const url = await getSignedUrl(this.options.client, command, {
       expiresIn: this.options.uploadTtlSeconds ?? 900,
@@ -97,20 +235,92 @@ export class S3AssetStore implements AssetStore {
       fileName,
       mimeType: input.mimeType,
       size: input.size,
+      checksum,
       createdAt: Date.now(),
     });
-    return { uploadId, url, headers: { "content-type": input.mimeType } };
+    return {
+      uploadId,
+      url,
+      headers: {
+        "content-type": input.mimeType,
+      },
+    };
   }
 
   async finalizeUpload(input: Parameters<AssetStore["finalizeUpload"]>[0]): Promise<Asset> {
-    const pending = this.pending.get(input.uploadId);
-    if (pending === undefined) throw new Error("Upload session does not exist or expired.");
+    const checksum = normalizedChecksum(input.checksum);
+    let pending = this.pending.get(input.uploadId);
+    if (pending === undefined) {
+      const listed = await this.options.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.options.bucket,
+          Prefix: `uploads/${input.uploadId}/`,
+          MaxKeys: 2,
+        }),
+        input.signal === undefined ? undefined : { abortSignal: input.signal },
+      );
+      const key = listed.Contents?.[0]?.Key;
+      if (key === undefined || (listed.Contents?.length ?? 0) !== 1) {
+        const assetPrefix = `assets/${input.checksum.toLowerCase()}/`;
+        const finalized = await this.options.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.options.bucket,
+            Prefix: assetPrefix,
+          }),
+          input.signal === undefined ? undefined : { abortSignal: input.signal },
+        );
+        const originalKey = finalized.Contents?.find(
+          (object) => object.Key?.split("/").length === 3,
+        )?.Key;
+        if (originalKey !== undefined) {
+          return materializeAsset(
+            this.options,
+            input.checksum.toLowerCase(),
+            { Key: originalKey },
+            finalized.Contents ?? [],
+            input.signal,
+          );
+        }
+        throw new CmsError({
+          code: "CMS_ASSET_005",
+          message: "Upload session does not exist, is ambiguous, or expired.",
+          category: "validation",
+          retryable: false,
+        });
+      }
+      const head = await this.options.client.send(
+        new HeadObjectCommand({ Bucket: this.options.bucket, Key: key }),
+        input.signal === undefined ? undefined : { abortSignal: input.signal },
+      );
+      const fileName = head.Metadata?.originalfilename ?? key.split("/").at(-1) ?? "asset";
+      pending = {
+        id: input.uploadId,
+        key,
+        fileName,
+        mimeType: head.Metadata?.declaredmime ?? head.ContentType ?? "application/octet-stream",
+        size: Number(head.Metadata?.declaredsize ?? head.ContentLength ?? 0),
+        checksum: normalizedChecksum(head.Metadata?.declaredsha256 ?? ""),
+        createdAt: head.LastModified?.getTime() ?? Date.now(),
+      };
+    }
     const response = await this.options.client.send(
       new HeadObjectCommand({ Bucket: this.options.bucket, Key: pending.key }),
       input.signal === undefined ? undefined : { abortSignal: input.signal },
     );
     const size = response.ContentLength ?? pending.size;
-    if (size !== pending.size || response.ContentType !== pending.mimeType) {
+    const uploaded = await this.options.client.send(
+      new GetObjectCommand({ Bucket: this.options.bucket, Key: pending.key }),
+      input.signal === undefined ? undefined : { abortSignal: input.signal },
+    );
+    const actual = await uploadedObject(uploaded.Body);
+    if (
+      size !== pending.size ||
+      response.ContentType !== pending.mimeType ||
+      pending.checksum !== checksum ||
+      response.Metadata?.declaredsha256 !== checksum ||
+      actual.checksum !== checksum ||
+      !assetBytesMatchMime(actual.bytes, pending.mimeType)
+    ) {
       throw new CmsError({
         code: "CMS_ASSET_003",
         message: "The uploaded object does not match the declared size or media type.",
@@ -118,16 +328,8 @@ export class S3AssetStore implements AssetStore {
         retryable: false,
       });
     }
-    if (!/^[a-f0-9]{64}$/i.test(input.checksum)) {
-      throw new CmsError({
-        code: "CMS_ASSET_004",
-        message: "A SHA-256 checksum is required to finalize an upload.",
-        category: "validation",
-        retryable: false,
-      });
-    }
-    const id = `ast_${input.checksum.slice(0, 24)}` as AssetId;
-    const assetKey = `assets/${input.checksum.toLowerCase()}/${pending.fileName}`;
+    const id = `ast_${checksum.slice(0, 24)}` as AssetId;
+    const assetKey = `assets/${checksum}/${pending.fileName}`;
     await this.options.client.send(
       new CopyObjectCommand({
         Bucket: this.options.bucket,
@@ -137,10 +339,11 @@ export class S3AssetStore implements AssetStore {
           "/",
         ),
         ContentType: pending.mimeType,
+        CacheControl: "public, max-age=31536000, immutable",
         MetadataDirective: "REPLACE",
         Metadata: {
           assetId: id,
-          sha256: input.checksum.toLowerCase(),
+          sha256: checksum,
           originalFileName: pending.fileName,
         },
       }),
@@ -156,8 +359,8 @@ export class S3AssetStore implements AssetStore {
       fileName: pending.fileName,
       mimeType: response.ContentType ?? pending.mimeType,
       size,
-      checksum: input.checksum,
-      url: `${this.options.publicBaseUrl.replace(/\/$/, "")}/${assetKey}`,
+      checksum,
+      url: publicAssetUrl(this.options, assetKey),
     };
   }
 
@@ -169,9 +372,21 @@ export class S3AssetStore implements AssetStore {
   async deleteAsset(id: AssetId, signal?: AbortSignal): Promise<void> {
     const asset = await this.readAsset(id);
     if (asset === undefined) return;
-    const key = new URL(asset.url).pathname.replace(/^\//, "");
+    const prefix = `assets/${asset.checksum.toLowerCase()}/`;
+    const listed = await this.options.client.send(
+      new ListObjectsV2Command({ Bucket: this.options.bucket, Prefix: prefix }),
+      signal === undefined ? undefined : { abortSignal: signal },
+    );
     await this.options.client.send(
-      new DeleteObjectCommand({ Bucket: this.options.bucket, Key: key }),
+      new DeleteObjectsCommand({
+        Bucket: this.options.bucket,
+        Delete: {
+          Objects: (listed.Contents ?? []).flatMap((object) =>
+            object.Key === undefined ? [] : [{ Key: object.Key }],
+          ),
+          Quiet: true,
+        },
+      }),
       signal === undefined ? undefined : { abortSignal: signal },
     );
   }
@@ -188,22 +403,18 @@ export class S3AssetStore implements AssetStore {
       }),
       input.signal === undefined ? undefined : { abortSignal: input.signal },
     );
+    const objects = response.Contents ?? [];
+    const originals = objects.filter(
+      (object): object is typeof object & { readonly Key: string } =>
+        object.Key?.split("/").length === 3,
+    );
     return {
-      items: (response.Contents ?? []).flatMap((object) => {
-        if (object.Key === undefined) return [];
-        const fileName = object.Key.split("/").at(-1) ?? object.Key;
-        const checksum = object.Key.split("/")[1] ?? object.ETag?.replaceAll('"', "") ?? "";
-        return [
-          {
-            id: `ast_${checksum.slice(0, 24)}` as AssetId,
-            fileName,
-            mimeType: "application/octet-stream",
-            size: object.Size ?? 0,
-            checksum,
-            url: `${this.options.publicBaseUrl.replace(/\/$/, "")}/${object.Key}`,
-          },
-        ];
-      }),
+      items: await Promise.all(
+        originals.map((original) => {
+          const checksum = original.Key.split("/")[1] ?? "";
+          return materializeAsset(this.options, checksum, original, objects, input.signal);
+        }),
+      ),
       ...(response.NextContinuationToken === undefined
         ? {}
         : { nextCursor: response.NextContinuationToken }),
@@ -214,9 +425,38 @@ export class S3AssetStore implements AssetStore {
     readonly olderThan: Date;
     readonly signal?: AbortSignal;
   }): Promise<readonly string[]> {
-    const expired = [...this.pending.values()].filter(
+    const remembered = [...this.pending.values()].filter(
       (upload) => upload.createdAt < input.olderThan.getTime(),
     );
+    const listed = await this.options.client.send(
+      new ListObjectsV2Command({ Bucket: this.options.bucket, Prefix: "uploads/" }),
+      input.signal === undefined ? undefined : { abortSignal: input.signal },
+    );
+    const discovered: PendingUpload[] = (listed.Contents ?? []).flatMap((object) => {
+      if (
+        object.Key === undefined ||
+        object.LastModified === undefined ||
+        object.LastModified >= input.olderThan
+      ) {
+        return [];
+      }
+      const [, id, fileName = "asset"] = object.Key.split("/");
+      if (id === undefined) return [];
+      return [
+        {
+          id,
+          key: object.Key,
+          fileName,
+          mimeType: "application/octet-stream",
+          size: object.Size ?? 0,
+          checksum: "",
+          createdAt: object.LastModified.getTime(),
+        },
+      ];
+    });
+    const expired = [
+      ...new Map([...remembered, ...discovered].map((upload) => [upload.key, upload])).values(),
+    ];
     await Promise.all(
       expired.map((upload) =>
         this.options.client.send(

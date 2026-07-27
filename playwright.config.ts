@@ -16,6 +16,7 @@ const browsers = [
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  snapshotPathTemplate: "{testDir}/snapshots/{projectName}/{arg}{ext}",
   tsconfig: "./tsconfig.e2e.json",
   timeout: 30_000,
   expect: { timeout: 7_500 },
@@ -38,7 +39,7 @@ export default defineConfig({
   ),
   webServer: [
     {
-      command: `pnpm --filter @git-native-cms/playground-next exec next dev --hostname 127.0.0.1 --port ${nextPort}`,
+      command: `pnpm --filter @git-native-cms/playground-next exec next start --hostname 127.0.0.1 --port ${nextPort}`,
       url: `http://127.0.0.1:${nextPort}`,
       reuseExistingServer: false,
       timeout: 120_000,

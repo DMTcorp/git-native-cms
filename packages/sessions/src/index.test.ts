@@ -27,4 +27,28 @@ describe("rotating cookie sessions", () => {
     await service.logout(rotated.token, new Date("2026-01-01T00:11:00.000Z"));
     expect(revoke).toHaveBeenCalledWith("github-token", actor);
   });
+
+  it("prevents fixation, tampering, and idle-session reuse", async () => {
+    const service = new RotatingCookieSessionService(
+      "another-secret-longer-than-thirty-two-characters",
+      {
+        secure: true,
+        idleTtlMs: 60_000,
+      },
+    );
+    const first = await service.issue(actor, new Date("2026-01-01T00:00:00.000Z"));
+    const second = await service.issue(actor, new Date("2026-01-01T00:00:00.000Z"));
+    expect(second.session.id).not.toBe(first.session.id);
+    expect(second.csrfToken).not.toBe(first.csrfToken);
+    const tampered = first.token.split(".");
+    const authenticationTag = tampered[4];
+    if (authenticationTag === undefined) throw new Error("Expected a compact JWE session token.");
+    tampered[4] = `${authenticationTag.startsWith("A") ? "B" : "A"}${authenticationTag.slice(1)}`;
+    await expect(
+      service.read(tampered.join("."), new Date("2026-01-01T00:00:30.000Z")),
+    ).rejects.toMatchObject({ code: "CMS_AUTH_003" });
+    await expect(
+      service.read(first.token, new Date("2026-01-01T00:01:01.000Z")),
+    ).rejects.toMatchObject({ code: "CMS_AUTH_007" });
+  });
 });

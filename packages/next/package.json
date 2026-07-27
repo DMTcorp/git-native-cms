@@ -5,7 +5,8 @@
   "type": "module",
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "styles.css"
   ],
   "exports": {
     ".": {
@@ -23,11 +24,19 @@
     "./preview": {
       "types": "./dist/preview.d.ts",
       "import": "./dist/preview.js"
-    }
+    },
+    "./registry": {
+      "types": "./dist/registry.d.ts",
+      "import": "./dist/registry.js"
+    },
+    "./styles.css": "./styles.css"
   },
   "dependencies": {
     "@git-native-cms/editor": "workspace:*",
+    "@git-native-cms/editor-ui": "workspace:*",
+    "@git-native-cms/hosted-runtime": "workspace:*",
     "@git-native-cms/react": "workspace:*",
+    "@git-native-cms/schema": "workspace:*",
     "@git-native-cms/server": "workspace:*"
   },
   "peerDependencies": {

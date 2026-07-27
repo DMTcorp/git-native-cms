@@ -18,6 +18,79 @@ export interface ContentClient {
   invalidate(): void;
 }
 
+export interface ContentIndexEntry {
+  readonly id: string;
+  readonly type: string;
+  readonly title: string;
+  readonly path: string;
+}
+
+export async function loadRedirects(
+  client: ContentClient,
+  signal?: AbortSignal,
+): Promise<Readonly<Record<string, string>>> {
+  return client.get<Readonly<Record<string, string>>>("redirects.json", signal);
+}
+
+export function resolveRedirect(
+  redirects: Readonly<Record<string, string>>,
+  path: string,
+  maximumHops = 4,
+): string | undefined {
+  let current = path;
+  const visited = new Set<string>();
+  for (let hops = 0; hops < maximumHops; hops += 1) {
+    const next = redirects[current];
+    if (next === undefined) return current === path ? undefined : current;
+    if (visited.has(current) || visited.has(next)) {
+      throw new CmsError({
+        code: "CMS_DELIVERY_009",
+        message: `Redirect loop detected from ${path}.`,
+        category: "validation",
+        retryable: false,
+      });
+    }
+    visited.add(current);
+    current = next;
+  }
+  throw new CmsError({
+    code: "CMS_DELIVERY_010",
+    message: `Redirect from ${path} exceeds ${maximumHops} hops.`,
+    category: "validation",
+    retryable: false,
+  });
+}
+
+export async function loadContentGraph(
+  client: ContentClient,
+  signal?: AbortSignal,
+): Promise<
+  readonly {
+    readonly id: string;
+    readonly type: string;
+    readonly data: Readonly<Record<string, unknown>>;
+  }[]
+> {
+  const index = await client.get<readonly ContentIndexEntry[]>("content-index.json", signal);
+  const documents = await Promise.all(
+    index.map((entry) => client.get<unknown>(entry.path, signal).catch(() => undefined)),
+  );
+  return documents.flatMap((value) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+    const record = value as Readonly<Record<string, unknown>>;
+    if (typeof record.id !== "string" || typeof record.type !== "string") return [];
+    return [
+      {
+        id: record.id,
+        type: record.type,
+        data: Object.fromEntries(
+          Object.entries(record).filter(([key]) => !["id", "type", "schemaVersion"].includes(key)),
+        ),
+      },
+    ];
+  });
+}
+
 export function createContentClient(input: {
   readonly environment: "preview" | "staging" | "production";
   readonly source: ContentSource;
@@ -112,6 +185,13 @@ function isConditionalConflict(error: unknown): boolean {
   return status === 409 || status === 412;
 }
 
+function releaseContentType(path: string): string {
+  if (path.endsWith(".xml")) return "application/xml; charset=utf-8";
+  if (path.endsWith(".txt")) return "text/plain; charset=utf-8";
+  if (path.endsWith(".html")) return "text/html; charset=utf-8";
+  return "application/json; charset=utf-8";
+}
+
 export class S3ReleaseStore implements ReleaseStore {
   constructor(
     private readonly options: {
@@ -136,7 +216,7 @@ export class S3ReleaseStore implements ReleaseStore {
               Bucket: this.options.bucket,
               Key: key,
               Body: content,
-              ContentType: "application/json; charset=utf-8",
+              ContentType: releaseContentType(path),
               CacheControl: "public, max-age=31536000, immutable",
               IfNoneMatch: "*",
             }),
@@ -208,6 +288,36 @@ export class S3ReleaseStore implements ReleaseStore {
       }
       throw error;
     }
+  }
+
+  async listReleases(input: {
+    readonly cursor?: string;
+    readonly signal?: AbortSignal;
+  }): Promise<{ readonly items: readonly StoredRelease[]; readonly nextCursor?: string }> {
+    const prefix = this.key("releases/");
+    const response = await this.options.client.send(
+      new ListObjectsV2Command({
+        Bucket: this.options.bucket,
+        Prefix: prefix,
+        Delimiter: "/",
+        ...(input.cursor === undefined ? {} : { ContinuationToken: input.cursor }),
+      }),
+      input.signal === undefined ? undefined : { abortSignal: input.signal },
+    );
+    const ids = (response.CommonPrefixes ?? [])
+      .map(({ Prefix }) =>
+        Prefix === undefined || !Prefix.startsWith(prefix)
+          ? undefined
+          : Prefix.slice(prefix.length).replace(/\/$/u, ""),
+      )
+      .filter((id): id is ReleaseId => id?.startsWith("rel_") === true);
+    const releases = await Promise.all(ids.map((id) => this.readRelease(id, input.signal)));
+    return {
+      items: releases.filter((release): release is StoredRelease => release !== undefined),
+      ...(response.NextContinuationToken === undefined
+        ? {}
+        : { nextCursor: response.NextContinuationToken }),
+    };
   }
 
   async readPointer(

@@ -35,6 +35,10 @@ export interface PullRequest {
 
 export interface GitProvider {
   resolveRef(ref: string, signal?: AbortSignal): Promise<GitRef>;
+  listBranches(input: {
+    readonly prefix?: string;
+    readonly signal?: AbortSignal;
+  }): Promise<readonly GitRef[]>;
   createBranch(input: {
     readonly branch: string;
     readonly from: GitCommitSha;
@@ -171,6 +175,7 @@ export interface ReleaseBuilderPort {
     readonly schemaVersion: number;
     readonly documents: readonly ReleaseBuildDocument[];
     readonly redirects?: Readonly<Record<string, string>>;
+    readonly artifacts?: Readonly<Record<string, string>>;
   }): Promise<StoredRelease>;
 }
 
@@ -184,6 +189,10 @@ export interface EnvironmentPointer {
 export interface ReleaseStore {
   writeRelease(release: StoredRelease, signal?: AbortSignal): Promise<void>;
   readRelease(id: ReleaseId, signal?: AbortSignal): Promise<StoredRelease | undefined>;
+  listReleases(input: {
+    readonly cursor?: string;
+    readonly signal?: AbortSignal;
+  }): Promise<Page<StoredRelease>>;
   readPointer(
     environment: EnvironmentPointer["environment"],
     signal?: AbortSignal,
@@ -202,6 +211,12 @@ export interface Asset {
   readonly size: number;
   readonly checksum: string;
   readonly url: string;
+  readonly variants?: readonly {
+    readonly width: number;
+    readonly height: number;
+    readonly format: string;
+    readonly url: string;
+  }[];
 }
 
 export interface AssetStore {
@@ -209,6 +224,7 @@ export interface AssetStore {
     readonly fileName: string;
     readonly mimeType: string;
     readonly size: number;
+    readonly checksum: string;
     readonly actor: Actor;
     readonly signal?: AbortSignal;
   }): Promise<{
@@ -227,6 +243,15 @@ export interface AssetStore {
     readonly cursor?: string;
     readonly signal?: AbortSignal;
   }): Promise<Page<Asset>>;
+}
+
+export interface AssetUsagePort {
+  usages(id: AssetId, signal?: AbortSignal): Promise<readonly string[]>;
+  isReleased(id: AssetId, signal?: AbortSignal): Promise<boolean>;
+}
+
+export interface AssetProcessorPort {
+  process(asset: Asset, signal?: AbortSignal): Promise<Asset>;
 }
 
 export interface SessionRecord {
@@ -265,6 +290,18 @@ export interface RevalidationPort {
   }): Promise<void>;
 }
 
+export interface PublicationNotifierPort {
+  notify(input: {
+    readonly environment: "preview" | "staging" | "production";
+    readonly releaseId: ReleaseId;
+    readonly revision: GitCommitSha;
+    readonly tags: readonly string[];
+    readonly paths: readonly string[];
+    readonly idempotencyKey: string;
+    readonly signal?: AbortSignal;
+  }): Promise<void>;
+}
+
 export interface TranslationProvider {
   createJob(input: {
     readonly sourceLocale: string;
@@ -287,14 +324,39 @@ export interface WebhookReplayStore {
   claim(deliveryId: string, expiresAt: string): Promise<boolean>;
 }
 
+export interface RateLimitPort {
+  consume(input: {
+    readonly key: string;
+    readonly scope: string;
+    readonly limit: number;
+    readonly windowMs: number;
+    readonly now: string;
+  }): Promise<{
+    readonly allowed: boolean;
+    readonly remaining: number;
+    readonly resetAt: string;
+  }>;
+}
+
 export interface Clock {
   now(): Date;
 }
 
 export interface IdGenerator {
   changeId(): Change["id"];
+  documentId(): DocumentId;
+  scheduleId(): string;
   requestId(): string;
   suffix(): string;
+}
+
+export interface SchedulerPort {
+  workflow(input: {
+    readonly scheduleId: string;
+    readonly executeAt: string;
+    readonly action: "publish" | "unpublish";
+    readonly documentIds: readonly DocumentId[];
+  }): { readonly path: string; readonly content: string };
 }
 
 export interface IdempotencyStore {

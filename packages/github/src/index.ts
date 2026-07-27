@@ -73,6 +73,9 @@ export class GitHubGitProvider implements GitProvider {
   }
 
   async resolveRef(ref: string): Promise<GitRef> {
+    if (/^[a-f0-9]{40}$/iu.test(ref)) {
+      return { name: ref, sha: ref as GitCommitSha };
+    }
     const name = normalizeGitRef(ref);
     const response = await this.requester.request(
       "GET /repos/{owner}/{repo}/git/ref/{ref}",
@@ -80,6 +83,29 @@ export class GitHubGitProvider implements GitProvider {
     );
     const object = record(record(response.data).object);
     return { name, sha: shaFrom(object) };
+  }
+
+  async listBranches(input: {
+    readonly prefix?: string;
+    readonly signal?: AbortSignal;
+  }): Promise<readonly GitRef[]> {
+    const prefix = input.prefix ?? "";
+    const response = await this.requester.request(
+      "GET /repos/{owner}/{repo}/git/matching-refs/{ref}",
+      this.parameters({ ref: `heads/${prefix}` }),
+    );
+    if (!Array.isArray(response.data)) return [];
+    return response.data
+      .map((value) => {
+        const data = record(value);
+        const ref = typeof data.ref === "string" ? data.ref.replace(/^refs\/heads\//u, "") : "";
+        const object = record(data.object);
+        return ref.length > 0 && typeof object.sha === "string"
+          ? { name: ref, sha: object.sha as GitCommitSha }
+          : undefined;
+      })
+      .filter((value): value is GitRef => value !== undefined)
+      .sort((left, right) => left.name.localeCompare(right.name));
   }
 
   async createBranch(input: {
@@ -249,7 +275,7 @@ export class GitHubGitProvider implements GitProvider {
         this.parameters({
           issue_number: input.number,
           body: [
-            `Approved in Git-native CMS by @${input.actor.login}.`,
+            `Approval recorded in Git-native CMS by @${input.actor.login}.`,
             input.body ?? "",
             "",
             "<!-- git-native-cms-approval -->",

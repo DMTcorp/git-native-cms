@@ -44,6 +44,60 @@ export function resolveLocalizedFields<TFields extends Record<string, unknown>>(
     );
 }
 
+function pointerSegments(pointer: string): readonly string[] {
+  if (pointer === "" || !pointer.startsWith("/")) {
+    throw new Error("Localized field keys must be RFC 6901 pointers.");
+  }
+  return pointer
+    .slice(1)
+    .split("/")
+    .map((segment) => {
+      if (/~(?![01])/u.test(segment)) throw new Error("Localized field pointer escape is invalid.");
+      const value = segment.replaceAll("~1", "/").replaceAll("~0", "~");
+      if (["__proto__", "constructor", "prototype"].includes(value)) {
+        throw new Error("Localized field pointer contains a protected segment.");
+      }
+      return value;
+    });
+}
+
+function setLocalizedValue(target: unknown, pointer: string, value: unknown): void {
+  const segments = pointerSegments(pointer);
+  let current = target;
+  for (const [index, segment] of segments.entries()) {
+    if (typeof current !== "object" || current === null) return;
+    const last = index === segments.length - 1;
+    if (Array.isArray(current)) {
+      const arrayIndex = Number(segment);
+      if (!Number.isSafeInteger(arrayIndex) || arrayIndex < 0 || arrayIndex >= current.length)
+        return;
+      if (last) current[arrayIndex] = structuredClone(value);
+      else current = current[arrayIndex];
+      continue;
+    }
+    const record = current as Record<string, unknown>;
+    if (!(segment in record)) return;
+    if (last) record[segment] = structuredClone(value);
+    else current = record[segment];
+  }
+}
+
+export function materializeLocalizedValue<TValue>(
+  source: TValue,
+  locale: string,
+  definitions: readonly LocaleDefinition[],
+  documents: readonly LocalizedDocument<Record<string, unknown>>[],
+): TValue {
+  const localized = structuredClone(source);
+  const byLocale = new Map(documents.map((document) => [document.locale, document]));
+  for (const code of [...localeFallbackChain(locale, definitions)].reverse()) {
+    for (const [pointer, value] of Object.entries(byLocale.get(code)?.fields ?? {})) {
+      setLocalizedValue(localized, pointer, value);
+    }
+  }
+  return localized;
+}
+
 function xmlEscape(value: string): string {
   return value
     .replaceAll("&", "&amp;")

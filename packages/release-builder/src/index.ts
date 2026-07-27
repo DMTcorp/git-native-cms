@@ -20,6 +20,7 @@ export interface BuildReleaseInput {
   readonly schemaVersion: number;
   readonly documents: readonly ReleaseDocument[];
   readonly redirects?: Readonly<Record<string, string>>;
+  readonly artifacts?: Readonly<Record<string, string>>;
   readonly generatedAt?: string;
 }
 
@@ -28,7 +29,44 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function assertReleaseInput(input: BuildReleaseInput): void {
+  if (!/^[a-f0-9]{40}$/iu.test(input.gitCommit)) {
+    throw new Error("Release gitCommit must be an exact 40-character Git commit SHA.");
+  }
+  if (!/^sha256:[a-f0-9]{64}$/iu.test(input.registryDigest)) {
+    throw new Error("Release registryDigest must contain a full SHA-256 digest.");
+  }
+  if (
+    !Number.isSafeInteger(input.configVersion) ||
+    input.configVersion < 1 ||
+    !Number.isSafeInteger(input.schemaVersion) ||
+    input.schemaVersion < 1
+  ) {
+    throw new Error("Release config and schema versions must be positive integers.");
+  }
+  const paths = [
+    ...input.documents.map((document) => document.path),
+    ...Object.keys(input.artifacts ?? {}),
+  ];
+  for (const path of paths) {
+    if (
+      path.length === 0 ||
+      path.startsWith("/") ||
+      path.includes("\\") ||
+      path.split("/").some((segment) => segment === "" || segment === "." || segment === "..") ||
+      path === "manifest.json" ||
+      path === "checksums.json"
+    ) {
+      throw new Error(`Release path "${path}" is unsafe or reserved.`);
+    }
+  }
+  if (new Set(paths).size !== paths.length) {
+    throw new Error("Release document and artifact paths must be unique.");
+  }
+}
+
 export async function buildRelease(input: BuildReleaseInput): Promise<StoredRelease> {
+  assertReleaseInput(input);
   const orderedDocuments = [...input.documents].sort((left, right) =>
     left.path.localeCompare(right.path),
   );
@@ -42,6 +80,9 @@ export async function buildRelease(input: BuildReleaseInput): Promise<StoredRele
       value: document.value,
     })),
     redirects: input.redirects ?? {},
+    artifacts: Object.fromEntries(
+      Object.entries(input.artifacts ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+    ),
   };
   const releaseDigest = await sha256(canonicalJson(identity));
   const id = `rel_${releaseDigest.slice(0, 24)}` as ReleaseId;
@@ -54,6 +95,12 @@ export async function buildRelease(input: BuildReleaseInput): Promise<StoredRele
   }
   files["redirects.json"] = canonicalJson(input.redirects ?? {});
   checksums["redirects.json"] = await sha256(files["redirects.json"] ?? "");
+  for (const [path, source] of Object.entries(input.artifacts ?? {}).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    files[path] = source;
+    checksums[path] = await sha256(source);
+  }
   const manifest = {
     formatVersion: 1,
     releaseId: id,
@@ -88,7 +135,10 @@ export async function publishRelease(input: {
   const verification = await input.store.readRelease(input.release.id, input.signal);
   if (
     verification === undefined ||
-    verification.files["manifest.json"] !== input.release.files["manifest.json"]
+    Object.keys(verification.files).length !== Object.keys(input.release.files).length ||
+    !Object.entries(input.release.files).every(
+      ([path, content]) => verification.files[path] === content,
+    )
   ) {
     throw new Error("Release verification failed before the pointer update.");
   }

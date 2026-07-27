@@ -18,6 +18,7 @@
     "@git-native-cms/editor-bridge": "workspace:*",
     "@git-native-cms/editor-ui": "workspace:*",
     "@git-native-cms/hosted-runtime": "workspace:*",
+    "@git-native-cms/localization": "workspace:*",
     "@git-native-cms/permissions": "workspace:*",
     "@git-native-cms/react": "workspace:*",
     "@git-native-cms/schema": "workspace:*",

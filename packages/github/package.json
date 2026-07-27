@@ -21,6 +21,9 @@
     "@octokit/core": "catalog:",
     "@octokit/webhooks": "catalog:"
   },
+  "devDependencies": {
+    "@git-native-cms/adapter-kit": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"

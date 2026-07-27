@@ -19,6 +19,10 @@
     "@git-native-cms/protocol": "workspace:*",
     "@modelcontextprotocol/sdk": "catalog:"
   },
+  "devDependencies": {
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/testing": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"

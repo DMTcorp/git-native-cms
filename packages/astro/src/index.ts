@@ -32,3 +32,10 @@ export function createAstroCmsEndpoint(
 ): (context: { readonly request: Request }) => Promise<Response> {
   return ({ request }) => server.handle(request);
 }
+
+export { CmsHostedApp, createCmsPreviewComponent } from "@git-native-cms/hosted-runtime/react";
+export {
+  createHostedCmsRuntime,
+  type HostedCmsRuntime,
+  type HostedRuntimeEnvironment,
+} from "@git-native-cms/hosted-runtime";

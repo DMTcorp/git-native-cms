@@ -1,25 +1,39 @@
 ---
 import { CmsPageRenderer } from "@git-native-cms/react";
 import { sandboxRegistry } from "../cms-registry";
-import { loadPublishedPage } from "../public-content";
+import { loadPublishedSite } from "../public-content";
 import "../styles/site.css";
 
-const document = await loadPublishedPage();
+const { page: document, content } = await loadPublishedSite();
+const navigation = content.find((item) => item.type === "navigation");
+const navigationItems = Array.isArray(navigation?.data.items) ? navigation.data.items : [];
+const navigationLinks = navigationItems.flatMap((item) => {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+  const value = item as Readonly<Record<string, unknown>>;
+  return [{ href: String(value.href ?? "/"), label: String(value.label ?? "Link") }];
+});
 ---
 
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>Git-native CMS · Astro playground</title>
+    <title>{document.seo?.title ?? "Git-native CMS · Astro playground"}</title>
+    <meta name="description" content={document.seo?.description ?? ""} />
+    <link rel="canonical" href="https://git-native-cms-astro.vercel.app/" />
+    <link rel="alternate" hreflang="en-US" href="https://git-native-cms-astro.vercel.app/en-US" />
+    <link rel="alternate" hreflang="pl-PL" href="https://git-native-cms-astro.vercel.app/pl-PL" />
+    <link rel="alternate" hreflang="x-default" href="https://git-native-cms-astro.vercel.app/" />
   </head>
   <body>
     <main class="site">
       <nav class="nav">
         <a href="/">Fieldnotes / Astro</a>
+        {navigationLinks.map((item) => <a href={item.href}>{item.label}</a>)}
+        <a href="/pl-PL">Polski</a>
         <a href="/cms">Open CMS</a>
       </nav>
-      <CmsPageRenderer document={document} registry={sandboxRegistry} />
+      <CmsPageRenderer document={document} registry={sandboxRegistry} content={content} />
     </main>
   </body>
 </html>

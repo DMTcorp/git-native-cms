@@ -8,6 +8,7 @@ const accountId = "0a535d97b31b6da0b90858e64a2fded6";
 const endpoint = `https://${accountId}.r2.cloudflarestorage.com`;
 const assetsBucket = "git-native-cms-sandbox-assets";
 const releasesBucket = "git-native-cms-sandbox-releases";
+const stateBucket = "git-native-cms-sandbox-state";
 const assetsUrl = "https://pub-388b5226a5064710ac8fefc6772e1182.r2.dev";
 const releasesUrl = "https://pub-028a1270268a4ecf8bdcad27a5b62ef9.r2.dev";
 const state = randomBytes(24).toString("base64url");
@@ -78,6 +79,60 @@ function smokeTest(accessKeyId, secretAccessKey) {
   }
 }
 
+async function verifyBucketsAndConfigureCors(accessKeyId, secretAccessKey) {
+  const {
+    DeleteObjectCommand,
+    GetObjectCommand,
+    PutBucketCorsCommand,
+    PutObjectCommand,
+    S3Client,
+  } = await import("@aws-sdk/client-s3");
+  const client = new S3Client({
+    endpoint,
+    region: "auto",
+    credentials: { accessKeyId, secretAccessKey },
+  });
+  const key = `health/configuration-${randomBytes(12).toString("hex")}.txt`;
+  try {
+    for (const bucket of [assetsBucket, releasesBucket, stateBucket]) {
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: "git-native-cms-r2-configuration-check",
+          ContentType: "text/plain; charset=utf-8",
+        }),
+      );
+      const object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      if ((await object.Body?.transformToString()) !== "git-native-cms-r2-configuration-check") {
+        throw new Error(`R2 verification failed for ${bucket}.`);
+      }
+      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+    }
+    await client.send(
+      new PutBucketCorsCommand({
+        Bucket: assetsBucket,
+        CORSConfiguration: {
+          CORSRules: [
+            {
+              AllowedOrigins: [
+                "https://git-native-cms-next.vercel.app",
+                "https://git-native-cms-astro.vercel.app",
+              ],
+              AllowedMethods: ["PUT", "HEAD"],
+              AllowedHeaders: ["content-type", "x-amz-*"],
+              ExposeHeaders: ["etag"],
+              MaxAgeSeconds: 3600,
+            },
+          ],
+        },
+      }),
+    );
+  } finally {
+    client.destroy();
+  }
+}
+
 async function requestBody(request) {
   let body = "";
   for await (const chunk of request) {
@@ -123,7 +178,8 @@ const server = createServer(async (request, response) => {
             <p>Paste the S3 Access Key ID and Secret Access Key shown once by Cloudflare.
               They go directly to both Vercel Production projects and are never printed.</p>
             <p>The token should have Object Read &amp; Write access limited to
-              <code>${html(assetsBucket)}</code> and <code>${html(releasesBucket)}</code>.</p>
+              <code>${html(assetsBucket)}</code>, <code>${html(releasesBucket)}</code> and
+              private <code>${html(stateBucket)}</code>.</p>
             <form method="post" action="/configure" autocomplete="off">
               <input type="hidden" name="state" value="${html(state)}">
               <label>Access Key ID
@@ -153,6 +209,7 @@ const server = createServer(async (request, response) => {
       }
 
       smokeTest(accessKeyId, secretAccessKey);
+      await verifyBucketsAndConfigureCors(accessKeyId, secretAccessKey);
       const environment = {
         CMS_S3_ENDPOINT: endpoint,
         CMS_S3_REGION: "auto",
@@ -160,6 +217,7 @@ const server = createServer(async (request, response) => {
         CMS_S3_SECRET_ACCESS_KEY: secretAccessKey,
         CMS_ASSETS_BUCKET: assetsBucket,
         CMS_RELEASES_BUCKET: releasesBucket,
+        CMS_STATE_BUCKET: stateBucket,
         CMS_PUBLIC_ASSETS_URL: assetsUrl,
         CMS_PUBLIC_RELEASES_URL: releasesUrl,
       };

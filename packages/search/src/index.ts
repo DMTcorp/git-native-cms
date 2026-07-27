@@ -19,6 +19,21 @@ export interface SearchIndex {
   readonly tokens: Readonly<Record<string, readonly number[]>>;
 }
 
+export interface ReferenceEdge {
+  readonly sourceId: string;
+  readonly sourcePath: string;
+  readonly targetId: string;
+}
+
+export interface ReferenceGraph {
+  readonly edges: readonly ReferenceEdge[];
+  readonly broken: readonly {
+    readonly sourceId: string;
+    readonly sourcePath: string;
+    readonly reference: string;
+  }[];
+}
+
 function tokenize(value: string): readonly string[] {
   return value
     .normalize("NFKD")
@@ -81,4 +96,68 @@ export function findUsages(
   return documents
     .filter((document) => searchableText(document.value).split(/\s+/).includes(referenceId))
     .map((document) => ({ ...document, score: 1 }));
+}
+
+export function buildReferenceGraph(documents: readonly SearchDocument[]): ReferenceGraph {
+  const byId = new Map(documents.map((document) => [document.id, document]));
+  const byReference = new Map<string, SearchDocument>();
+  for (const document of documents) {
+    byReference.set(document.id, document);
+    if (typeof document.value === "object" && document.value !== null) {
+      const value = document.value as Readonly<Record<string, unknown>>;
+      if (typeof value.slug === "string") {
+        byReference.set(`${document.type}/${value.slug}`, document);
+      }
+    }
+  }
+  const edges: ReferenceEdge[] = [];
+  const broken: ReferenceGraph["broken"][number][] = [];
+  function visit(source: SearchDocument, value: unknown, path: string, key?: string): void {
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => visit(source, child, `${path}/${index}`));
+      return;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const [childKey, child] of Object.entries(value as Readonly<Record<string, unknown>>)) {
+        visit(
+          source,
+          child,
+          `${path}/${childKey.replaceAll("~", "~0").replaceAll("/", "~1")}`,
+          childKey,
+        );
+      }
+      return;
+    }
+    if (typeof value !== "string") return;
+    const referenceLike =
+      key === "ref" ||
+      key === "global" ||
+      key === "assetId" ||
+      value.startsWith("ast_") ||
+      byId.has(value);
+    if (!referenceLike) return;
+    const target = byReference.get(value);
+    if (target === undefined) {
+      broken.push({ sourceId: source.id, sourcePath: path, reference: value });
+      return;
+    }
+    if (target.id !== source.id) {
+      edges.push({ sourceId: source.id, sourcePath: path, targetId: target.id });
+    }
+  }
+  for (const document of documents) visit(document, document.value, "");
+  return {
+    edges: edges.sort(
+      (left, right) =>
+        left.targetId.localeCompare(right.targetId) ||
+        left.sourceId.localeCompare(right.sourceId) ||
+        left.sourcePath.localeCompare(right.sourcePath),
+    ),
+    broken: broken.sort(
+      (left, right) =>
+        left.reference.localeCompare(right.reference) ||
+        left.sourceId.localeCompare(right.sourceId) ||
+        left.sourcePath.localeCompare(right.sourcePath),
+    ),
+  };
 }

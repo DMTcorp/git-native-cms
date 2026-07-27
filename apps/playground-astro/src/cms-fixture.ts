@@ -34,6 +34,11 @@ export const change: Change = {
 export const document: ContentDocument<{
   readonly title: string;
   readonly route: { readonly path: string };
+  readonly redirectFrom: readonly string[];
+  readonly seo: { readonly title: string; readonly description: string };
+  readonly locales: Readonly<
+    Record<string, { readonly status: string; readonly fields: Readonly<Record<string, string>> }>
+  >;
   readonly sections: readonly {
     readonly id: string;
     readonly type: string;
@@ -49,6 +54,23 @@ export const document: ContentDocument<{
   data: {
     title: "Astro homepage",
     route: { path: "/" },
+    redirectFrom: ["/welcome"],
+    seo: {
+      title: "Fieldnotes · Astro Git-native CMS",
+      description: "A live Astro demonstration of Git-native visual publishing.",
+    },
+    locales: {
+      "pl-PL": {
+        status: "translated",
+        fields: {
+          "/title": "Strona główna Astro",
+          "/sections/0/heading": "Jeden model treści. Dwa prawdziwe renderery.",
+          "/sections/0/description": "Ten sam proces obsługuje Next.js i Astro.",
+          "/sections/1/heading": "Edycja renderowana na serwerze",
+          "/sections/1/description": "Astro uruchamia pełny CMS przez adapter serwerowy.",
+        },
+      },
+    },
     sections: [
       {
         id: "sec_astro_hero",

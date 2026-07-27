@@ -12,6 +12,15 @@ catalogs:
     '@aws-sdk/s3-request-presigner':
       specifier: latest
       version: 3.1095.0
+    '@dnd-kit/core':
+      specifier: latest
+      version: 6.3.1
+    '@dnd-kit/sortable':
+      specifier: latest
+      version: 10.0.0
+    '@dnd-kit/utilities':
+      specifier: latest
+      version: 3.2.2
     '@modelcontextprotocol/sdk':
       specifier: latest
       version: 1.29.0
@@ -45,6 +54,9 @@ catalogs:
     react-dom:
       specifier: latest
       version: 19.2.8
+    testcontainers:
+      specifier: latest
+      version: 12.0.4
     yaml:
       specifier: latest
       version: 2.9.0
@@ -53,6 +65,12 @@ importers:
 
   .:
     devDependencies:
+      '@aws-sdk/client-s3':
+        specifier: 'catalog:'
+        version: 3.1095.0
+      '@axe-core/playwright':
+        specifier: latest
+        version: 4.12.1(playwright-core@1.62.0)
       '@changesets/cli':
         specifier: latest
         version: 2.31.1(@types/node@26.1.1)
@@ -153,6 +171,9 @@ importers:
       '@git-native-cms/hosted-runtime':
         specifier: workspace:*
         version: link:../../packages/hosted-runtime
+      '@git-native-cms/localization':
+        specifier: workspace:*
+        version: link:../../packages/localization
       '@git-native-cms/permissions':
         specifier: workspace:*
         version: link:../../packages/permissions
@@ -214,6 +235,9 @@ importers:
       '@git-native-cms/hosted-runtime':
         specifier: workspace:*
         version: link:../../packages/hosted-runtime
+      '@git-native-cms/localization':
+        specifier: workspace:*
+        version: link:../../packages/localization
       '@git-native-cms/next':
         specifier: workspace:*
         version: link:../../packages/next
@@ -257,6 +281,9 @@ importers:
       '@git-native-cms/application':
         specifier: workspace:*
         version: link:../application
+      '@git-native-cms/core':
+        specifier: workspace:*
+        version: link:../core
       '@git-native-cms/testing':
         specifier: workspace:*
         version: link:../testing
@@ -275,9 +302,18 @@ importers:
       '@git-native-cms/git':
         specifier: workspace:*
         version: link:../git
+      '@git-native-cms/localization':
+        specifier: workspace:*
+        version: link:../localization
       '@git-native-cms/permissions':
         specifier: workspace:*
         version: link:../permissions
+      '@git-native-cms/search':
+        specifier: workspace:*
+        version: link:../search
+      '@git-native-cms/seo':
+        specifier: workspace:*
+        version: link:../seo
 
   packages/assets:
     dependencies:
@@ -293,12 +329,31 @@ importers:
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@git-native-cms/adapter-kit':
+        specifier: workspace:*
+        version: link:../adapter-kit
+      testcontainers:
+        specifier: 'catalog:'
+        version: 12.0.4
 
   packages/astro:
     dependencies:
       '@git-native-cms/astro-renderer':
         specifier: workspace:*
         version: link:../astro-renderer
+      '@git-native-cms/editor-ui':
+        specifier: workspace:*
+        version: link:../editor-ui
+      '@git-native-cms/hosted-runtime':
+        specifier: workspace:*
+        version: link:../hosted-runtime
+      '@git-native-cms/react':
+        specifier: workspace:*
+        version: link:../react
+      '@git-native-cms/schema':
+        specifier: workspace:*
+        version: link:../schema
       '@git-native-cms/server':
         specifier: workspace:*
         version: link:../server
@@ -377,6 +432,10 @@ importers:
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@git-native-cms/adapter-kit':
+        specifier: workspace:*
+        version: link:../adapter-kit
 
   packages/diff:
     dependencies:
@@ -392,12 +451,33 @@ importers:
 
   packages/editor:
     dependencies:
+      '@dnd-kit/core':
+        specifier: 'catalog:'
+        version: 6.3.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@dnd-kit/sortable':
+        specifier: 'catalog:'
+        version: 10.0.0(@dnd-kit/core@6.3.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)
+      '@dnd-kit/utilities':
+        specifier: 'catalog:'
+        version: 3.2.2(react@19.2.8)
+      '@fontsource/atkinson-hyperlegible':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/ibm-plex-mono':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/source-serif-4':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@git-native-cms/application':
         specifier: workspace:*
         version: link:../application
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../core
+      '@git-native-cms/diff':
+        specifier: workspace:*
+        version: link:../diff
       '@git-native-cms/document-model':
         specifier: workspace:*
         version: link:../document-model
@@ -481,6 +561,10 @@ importers:
       '@octokit/webhooks':
         specifier: 'catalog:'
         version: 14.2.0
+    devDependencies:
+      '@git-native-cms/adapter-kit':
+        specifier: workspace:*
+        version: link:../adapter-kit
 
   packages/hosted-runtime:
     dependencies:
@@ -490,6 +574,9 @@ importers:
       '@git-native-cms/application':
         specifier: workspace:*
         version: link:../application
+      '@git-native-cms/assets':
+        specifier: workspace:*
+        version: link:../assets
       '@git-native-cms/auth':
         specifier: workspace:*
         version: link:../auth
@@ -505,18 +592,42 @@ importers:
       '@git-native-cms/delivery':
         specifier: workspace:*
         version: link:../delivery
+      '@git-native-cms/editor':
+        specifier: workspace:*
+        version: link:../editor
+      '@git-native-cms/editor-bridge':
+        specifier: workspace:*
+        version: link:../editor-bridge
       '@git-native-cms/github':
         specifier: workspace:*
         version: link:../github
+      '@git-native-cms/image-pipeline':
+        specifier: workspace:*
+        version: link:../image-pipeline
       '@git-native-cms/integrations':
         specifier: workspace:*
         version: link:../integrations
+      '@git-native-cms/localization':
+        specifier: workspace:*
+        version: link:../localization
+      '@git-native-cms/mcp':
+        specifier: workspace:*
+        version: link:../mcp
+      '@git-native-cms/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@git-native-cms/permissions':
         specifier: workspace:*
         version: link:../permissions
+      '@git-native-cms/react':
+        specifier: workspace:*
+        version: link:../react
       '@git-native-cms/release-builder':
         specifier: workspace:*
         version: link:../release-builder
+      '@git-native-cms/search':
+        specifier: workspace:*
+        version: link:../search
       '@git-native-cms/server':
         specifier: workspace:*
         version: link:../server
@@ -526,9 +637,21 @@ importers:
       jose:
         specifier: 'catalog:'
         version: 6.2.4
+      react:
+        specifier: 'catalog:'
+        version: 19.2.8
+      react-dom:
+        specifier: '>=19'
+        version: 19.2.8(react@19.2.8)
 
   packages/image-pipeline:
     dependencies:
+      '@aws-sdk/client-s3':
+        specifier: 'catalog:'
+        version: 3.1095.0
+      '@git-native-cms/application':
+        specifier: workspace:*
+        version: link:../application
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../core
@@ -562,6 +685,13 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 'catalog:'
         version: 1.29.0(zod@4.4.3)
+    devDependencies:
+      '@git-native-cms/permissions':
+        specifier: workspace:*
+        version: link:../permissions
+      '@git-native-cms/testing':
+        specifier: workspace:*
+        version: link:../testing
 
   packages/migrations:
     dependencies:
@@ -577,9 +707,18 @@ importers:
       '@git-native-cms/editor':
         specifier: workspace:*
         version: link:../editor
+      '@git-native-cms/editor-ui':
+        specifier: workspace:*
+        version: link:../editor-ui
+      '@git-native-cms/hosted-runtime':
+        specifier: workspace:*
+        version: link:../hosted-runtime
       '@git-native-cms/react':
         specifier: workspace:*
         version: link:../react
+      '@git-native-cms/schema':
+        specifier: workspace:*
+        version: link:../schema
       '@git-native-cms/server':
         specifier: workspace:*
         version: link:../server
@@ -677,6 +816,9 @@ importers:
       '@git-native-cms/content-codecs':
         specifier: workspace:*
         version: link:../content-codecs
+      '@git-native-cms/content-repository':
+        specifier: workspace:*
+        version: link:../content-repository
       '@git-native-cms/core':
         specifier: workspace:*
         version: link:../core
@@ -907,6 +1049,11 @@ packages:
     resolution: {integrity: sha512-sl4Bm6yiMNYrZKkqqDFWN0UfnWhlS8ivKxrYl+6t0gCLrqr8y3B2IqZZbFRkfaVVp7C/baApyh71P+LeE1A2sQ==}
     engines: {node: '>=18.0.0'}
 
+  '@axe-core/playwright@4.12.1':
+    resolution: {integrity: sha512-rMd7xriptqKpP+w5265i4Hdkv2X5kbu6uiBi/B2I7uf3hieRBM3qDCfaKPtxfiYb2mKXfF+yLODJwIx+Jv1GDw==}
+    peerDependencies:
+      playwright-core: '>= 1.0.0'
+
   '@babel/code-frame@7.29.7':
     resolution: {integrity: sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==}
     engines: {node: '>=6.9.0'}
@@ -1120,6 +1267,28 @@ packages:
   '@ctrl/tinycolor@4.2.0':
     resolution: {integrity: sha512-kzyuwOAQnXJNLS9PSyrk0CWk35nWJW/zl/6KvnTBMFK65gm7U1/Z5BqjxeapjZCIhQcM/DsrEmcbRwDyXyXK4A==}
     engines: {node: '>=14'}
+
+  '@dnd-kit/accessibility@3.1.1':
+    resolution: {integrity: sha512-2P+YgaXF+gRsIihwwY1gCsQSYnu9Zyj2py8kY5fFvUM1qm2WA2u639R6YNVfU4GWr+ZM5mqEsfHZZLoRONbemw==}
+    peerDependencies:
+      react: '>=16.8.0'
+
+  '@dnd-kit/core@6.3.1':
+    resolution: {integrity: sha512-xkGBRQQab4RLwgXxoqETICr6S5JlogafbhNsidmrkVv2YRs5MLwpjoF2qpiGjQt8S9AoxtIV603s0GIUpY5eYQ==}
+    peerDependencies:
+      react: '>=16.8.0'
+      react-dom: '>=16.8.0'
+
+  '@dnd-kit/sortable@10.0.0':
+    resolution: {integrity: sha512-+xqhmIIzvAYMGfBYYnbKuNicfSsk4RksY2XdmJhT+HAC01nix6fHCztU68jooFiMUB01Ky3F0FyOvhG/BZrWkg==}
+    peerDependencies:
+      '@dnd-kit/core': ^6.3.0
+      react: '>=16.8.0'
+
+  '@dnd-kit/utilities@3.2.2':
+    resolution: {integrity: sha512-+MKAJEOfaBe5SmV6t34p80MMKhjvUz0vRrvVJbPT0WElzaOJ/1xs+D+KDv+tD/NE5ujfrChEcshd4fLn0wpiqg==}
+    peerDependencies:
+      react: '>=16.8.0'
 
   '@emmetio/abbreviation@2.3.3':
     resolution: {integrity: sha512-mgv58UrU3rh4YgbE/TzgLQwJ3pFsHHhCLqY20aJq+9comytTXUDNGG/SMtSeMJdkpxgXSXunBGLD8Boka3JyVA==}
@@ -1360,6 +1529,15 @@ packages:
 
   '@expressive-code/plugin-text-markers@0.44.1':
     resolution: {integrity: sha512-B3BsJoJ8CFMlcIX9f+X9tcI3C4zPDO601+YuLi9GheSTNro7ZfqSjLptMQKBHOWZvxnAtY5zvIX7iO/qtBhNBg==}
+
+  '@fontsource/atkinson-hyperlegible@5.3.0':
+    resolution: {integrity: sha512-Sp8Ve8+rQmENY2Lv02VH7sLpntzTTvnncnJMTbRE7DX6TLxGraN4ykZfzaUWIoCFmaomwkvNiqmlPkrKBuDoSA==}
+
+  '@fontsource/ibm-plex-mono@5.3.0':
+    resolution: {integrity: sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q==}
+
+  '@fontsource/source-serif-4@5.3.0':
+    resolution: {integrity: sha512-yQz8xmIgMzks8zQbpuca3UYtjxK798XCyQAGdDXmzBgvV7sdoK6d0YvE9F9kiYxORCEMRBgGZDZsSYcXj5KvwA==}
 
   '@grpc/grpc-js@1.14.4':
     resolution: {integrity: sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ==}
@@ -2722,6 +2900,10 @@ packages:
 
   async@3.2.6:
     resolution: {integrity: sha512-htCUDlxyyCLMgaM3xXg0C0LW2xqfuQ6p05pCEIsXuyQ+a1koYKTuBMzRNwmybfLgvJDMd0r1LTn4+E0Ti6C2AA==}
+
+  axe-core@4.12.1:
+    resolution: {integrity: sha512-s7iGf5GaVMxEG0ENN9x+xTr7GFZCb1ZP/1uATUpCEK2X78nDB3RwbtFCo9pGAf9ru+VwoQ464DkaLEeRM08wJA==}
+    engines: {node: '>=4'}
 
   axobject-query@4.1.0:
     resolution: {integrity: sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ==}
@@ -6138,6 +6320,11 @@ snapshots:
 
   '@aws/lambda-invoke-store@0.3.0': {}
 
+  '@axe-core/playwright@4.12.1(playwright-core@1.62.0)':
+    dependencies:
+      axe-core: 4.12.1
+      playwright-core: 1.62.0
+
   '@babel/code-frame@7.29.7':
     dependencies:
       '@babel/helper-validator-identifier': 7.29.7
@@ -6460,6 +6647,31 @@ snapshots:
 
   '@ctrl/tinycolor@4.2.0': {}
 
+  '@dnd-kit/accessibility@3.1.1(react@19.2.8)':
+    dependencies:
+      react: 19.2.8
+      tslib: 2.8.1
+
+  '@dnd-kit/core@6.3.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+    dependencies:
+      '@dnd-kit/accessibility': 3.1.1(react@19.2.8)
+      '@dnd-kit/utilities': 3.2.2(react@19.2.8)
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
+      tslib: 2.8.1
+
+  '@dnd-kit/sortable@10.0.0(@dnd-kit/core@6.3.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)':
+    dependencies:
+      '@dnd-kit/core': 6.3.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@dnd-kit/utilities': 3.2.2(react@19.2.8)
+      react: 19.2.8
+      tslib: 2.8.1
+
+  '@dnd-kit/utilities@3.2.2(react@19.2.8)':
+    dependencies:
+      react: 19.2.8
+      tslib: 2.8.1
+
   '@emmetio/abbreviation@2.3.3':
     dependencies:
       '@emmetio/scanner': 1.0.4
@@ -6640,6 +6852,12 @@ snapshots:
   '@expressive-code/plugin-text-markers@0.44.1':
     dependencies:
       '@expressive-code/core': 0.44.1
+
+  '@fontsource/atkinson-hyperlegible@5.3.0': {}
+
+  '@fontsource/ibm-plex-mono@5.3.0': {}
+
+  '@fontsource/source-serif-4@5.3.0': {}
 
   '@grpc/grpc-js@1.14.4':
     dependencies:
@@ -8066,6 +8284,8 @@ snapshots:
   async-sema@3.1.1: {}
 
   async@3.2.6: {}
+
+  axe-core@4.12.1: {}
 
   axobject-query@4.1.0: {}
 

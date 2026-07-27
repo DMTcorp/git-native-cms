@@ -1,22 +1,62 @@
 ---
 title: Sandbox deployment
-description: External services and secrets required by the public demonstration.
+description: Deploy the Next.js and Astro playgrounds with GitHub, Vercel and Cloudflare R2.
 ---
 
-The public sandbox uses two Vercel projects (`git-native-cms-next` and
-`git-native-cms-astro`), separate GitHub Apps and two Cloudflare R2 buckets. Keep every secret in
-GitHub Environments or Vercel Environment Variables; the browser bundle and content repository
-must never receive credentials.
+The reference sandbox uses:
 
-## Provisioning checklist
+- source: `DMTcorp/git-native-cms`;
+- content: `DMTcorp/git-native-cms-sandbox-content`;
+- Vercel: `git-native-cms-next` and `git-native-cms-astro`;
+- R2: `git-native-cms-sandbox-assets`, `git-native-cms-sandbox-releases` and private
+  `git-native-cms-sandbox-state`;
+- one private GitHub App per playground.
 
-1. Create `DMTcorp/git-native-cms` and `DMTcorp/git-native-cms-sandbox-content`.
-2. Create one GitHub App per playground with its own callback and webhook URL.
-3. Create the `git-native-cms-sandbox-assets` and `git-native-cms-sandbox-releases` buckets.
-4. Configure the variables documented in `.env.example` for each deployment environment.
-5. Run `pnpm cms doctor`, `pnpm check`, `pnpm test:integration` and `pnpm test:e2e`.
-6. Deploy both SSR playgrounds, then exercise publish, delivery and rollback against the sandbox
-   content repository.
+## R2
 
-Set `CMS_R2_SMOKE=true` only in a protected integration environment. The smoke suite is read-only
-and validates R2 through the same S3 adapter used by production delivery.
+Create separate buckets and an API token limited to those buckets. Keep the state bucket private;
+only assets and releases receive public development URLs. Use the S3 endpoint
+`https://ACCOUNT_ID.r2.cloudflarestorage.com`, region `auto`, and public development URLs for
+`CMS_PUBLIC_ASSETS_URL` and `CMS_PUBLIC_RELEASES_URL`.
+
+The assets bucket CORS policy allows `PUT` and `HEAD` only from the two stable Vercel origins,
+including `content-type` and signed `x-amz-*` headers. `tooling/scripts/configure-r2.mjs` applies
+that policy after its credential smoke test.
+
+Set immutable release and asset objects to long-lived cache. Configure
+`environments/*/current.json` for revalidation/no-cache. The adapter uses conditional writes for
+immutable files and compare-and-swap for pointers.
+
+## Vercel
+
+Set every variable from `.env.example` in Production and Preview. `CMS_ORIGIN` must match the
+stable deployment origin used by the GitHub App. Set `CMS_HOSTED_RUNTIME=true`.
+
+The two playgrounds must use different App IDs, private keys, OAuth client secrets and webhook
+secrets. They may share the content repository and R2 buckets.
+
+## GitHub Actions
+
+Add repository secrets:
+
+```text
+CMS_SCHEDULE_ENDPOINT=https://YOUR_STABLE_ORIGIN/api/cms/schedules/execute
+CMS_SCHEDULE_TOKEN=<same value as Vercel>
+```
+
+The five-minute executor is concurrency-locked and safe to retry. Publication hooks and
+translation providers are optional; configure both deployment/revalidation URLs together.
+
+## Acceptance run
+
+```bash
+pnpm cms doctor
+pnpm check
+CMS_CONTAINER_TESTS=true pnpm test:integration
+pnpm test:e2e
+pnpm test:live
+```
+
+Then verify GitHub login, a page plus global navigation/pricing in one Change, preview, review,
+staging, production CDN delivery, rollback, asset deletion safety, `en-US`/`pl-PL`, scheduling and
+an editor-only MCP actor that cannot publish.

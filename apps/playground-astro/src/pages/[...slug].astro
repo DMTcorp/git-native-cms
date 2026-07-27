@@ -1,18 +1,63 @@
 ---
+import { CmsPageRenderer } from "@git-native-cms/react";
+import { sandboxRegistry } from "../cms-registry";
+import { loadPublishedRedirect, loadPublishedSite } from "../public-content";
 import "../styles/site.css";
-import { PreviewDemo } from "../components/PreviewDemo";
 
-const isPreview = (Astro.params.slug ?? "").startsWith("__cms/preview");
-if (!isPreview) Astro.response.status = 404;
+const segments = (Astro.params.slug ?? "").split("/").filter(Boolean);
+const locale = segments[0] ?? "";
+if ((locale === "en-US" || locale === "pl-PL") && segments.length > 1) {
+  const target = await loadPublishedRedirect(`/${segments.slice(1).join("/")}`);
+  if (target !== undefined) {
+    return Astro.redirect(`/${locale}${target === "/" ? "" : target}`, 308);
+  }
+}
+const supportedLocale = (locale === "en-US" || locale === "pl-PL") && segments.length === 1;
+if (!supportedLocale) Astro.response.status = 404;
+const published = supportedLocale ? await loadPublishedSite(locale) : undefined;
+const document = published?.page;
+const renderableDocument = document ?? { id: "not-found", title: "Not found", sections: [] };
+const content = published?.content ?? [];
+const navigation = content.find((item) => item.type === "navigation");
+const navigationItems = Array.isArray(navigation?.data.items) ? navigation.data.items : [];
+const navigationLinks = navigationItems.flatMap((item) => {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+  const value = item as Readonly<Record<string, unknown>>;
+  return [{ href: String(value.href ?? "/"), label: String(value.label ?? "Link") }];
+});
+const origin = "https://git-native-cms-astro.vercel.app";
 ---
 
-<html lang="en">
+<html lang={supportedLocale ? locale : "en"}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>Preview · Astro playground</title>
+    <title>{document?.seo?.title ?? (supportedLocale ? "Fieldnotes" : "Not found")}</title>
+    {document?.seo?.description && <meta name="description" content={document.seo.description} />}
+    {supportedLocale && <link rel="canonical" href={`${origin}/${locale}`} />}
+    {supportedLocale && <link rel="alternate" hreflang="en-US" href={`${origin}/en-US`} />}
+    {supportedLocale && <link rel="alternate" hreflang="pl-PL" href={`${origin}/pl-PL`} />}
+    {supportedLocale && <link rel="alternate" hreflang="x-default" href={`${origin}/`} />}
   </head>
   <body>
-    {isPreview ? <PreviewDemo client:load /> : <main><h1>Not found</h1></main>}
+    {
+      document ? (
+        <main class="site">
+          <nav class="nav">
+            <a href={`/${locale}`}>Fieldnotes / Astro</a>
+            {navigationLinks.map((item) => <a href={item.href}>{item.label}</a>)}
+            <a href={locale === "pl-PL" ? "/en-US" : "/pl-PL"}>
+              {locale === "pl-PL" ? "English" : "Polski"}
+            </a>
+            <a href="/cms">Open CMS</a>
+          </nav>
+          <CmsPageRenderer document={renderableDocument} registry={sandboxRegistry} content={content} />
+        </main>
+      ) : (
+        <main>
+          <h1>Not found</h1>
+        </main>
+      )
+    }
   </body>
 </html>

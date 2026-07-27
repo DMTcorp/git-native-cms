@@ -42,6 +42,20 @@ export class DeterministicIds implements IdGenerator {
       random: new Uint8Array(10),
     });
   }
+  documentId(): DocumentId {
+    this.sequence += 1;
+    return createPrefixedId<"DocumentId">("doc", {
+      now: this.sequence,
+      random: new Uint8Array(10),
+    });
+  }
+  scheduleId(): string {
+    this.sequence += 1;
+    return createPrefixedId<"ScheduleId">("sch", {
+      now: this.sequence,
+      random: new Uint8Array(10),
+    });
+  }
   requestId(): string {
     this.sequence += 1;
     return `req_${this.sequence}`;
@@ -98,6 +112,13 @@ export class MemoryGitProvider implements GitProvider {
 
   async resolveRef(ref: string): Promise<GitRef> {
     return { name: ref, sha: this.branch(ref).sha };
+  }
+
+  async listBranches(input: { readonly prefix?: string }): Promise<readonly GitRef[]> {
+    return [...this.branches.entries()]
+      .filter(([name]) => input.prefix === undefined || name.startsWith(input.prefix))
+      .map(([name, branch]) => ({ name, sha: branch.sha }))
+      .sort((left, right) => left.name.localeCompare(right.name));
   }
 
   async createBranch(input: {
@@ -201,6 +222,10 @@ export class MemoryGitProvider implements GitProvider {
 export class MemoryContentRepository implements ContentRepository {
   private revisionCounter = 1;
   private readonly byRef = new Map<string, Map<DocumentId, ContentDocument>>();
+  private readonly mutations = new Map<
+    string,
+    { readonly fingerprint: string; readonly revision: Revision }
+  >();
 
   seed(ref: string, document: ContentDocument): void {
     const documents = this.byRef.get(ref) ?? new Map();
@@ -245,7 +270,21 @@ export class MemoryContentRepository implements ContentRepository {
     readonly ref: string;
     readonly documents: readonly ContentDocument[];
     readonly expectedRevision: Revision;
+    readonly idempotencyKey: string;
   }): Promise<Revision> {
+    const fingerprint = JSON.stringify({
+      operation: "write",
+      ref: input.ref,
+      documents: input.documents,
+      expectedRevision: input.expectedRevision,
+    });
+    const previous = this.mutations.get(input.idempotencyKey);
+    if (previous !== undefined) {
+      if (previous.fingerprint !== fingerprint) {
+        throw new Error("Idempotency key was reused for a different content write.");
+      }
+      return previous.revision;
+    }
     const documents = this.byRef.get(input.ref) ?? new Map();
     for (const document of input.documents) {
       if (document.revision !== input.expectedRevision) {
@@ -258,17 +297,35 @@ export class MemoryContentRepository implements ContentRepository {
       documents.set(document.id, { ...structuredClone(document), revision });
     }
     this.byRef.set(input.ref, documents);
+    this.mutations.set(input.idempotencyKey, { fingerprint, revision });
     return revision;
   }
 
   async deleteDocuments(input: {
     readonly ref: string;
     readonly documentIds: readonly DocumentId[];
+    readonly expectedRevision: Revision;
+    readonly idempotencyKey: string;
   }): Promise<Revision> {
+    const fingerprint = JSON.stringify({
+      operation: "delete",
+      ref: input.ref,
+      documentIds: input.documentIds,
+      expectedRevision: input.expectedRevision,
+    });
+    const previous = this.mutations.get(input.idempotencyKey);
+    if (previous !== undefined) {
+      if (previous.fingerprint !== fingerprint) {
+        throw new Error("Idempotency key was reused for a different content delete.");
+      }
+      return previous.revision;
+    }
     const documents = this.byRef.get(input.ref) ?? new Map();
     for (const id of input.documentIds) documents.delete(id);
     this.revisionCounter += 1;
-    return `sha_content_${this.revisionCounter}` as Revision;
+    const revision = `sha_content_${this.revisionCounter}` as Revision;
+    this.mutations.set(input.idempotencyKey, { fingerprint, revision });
+    return revision;
   }
 }
 
