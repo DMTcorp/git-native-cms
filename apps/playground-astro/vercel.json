@@ -1,5 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "astro",
-  "buildCommand": "cd ../.. && pnpm --filter @git-native-cms/playground-astro build"
+  "buildCommand": "cd ../.. && pnpm turbo run build --filter=@git-native-cms/playground-astro"
 }
