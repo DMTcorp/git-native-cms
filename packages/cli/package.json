@@ -1,0 +1,30 @@
+{
+  "name": "@git-native-cms/cli",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "cms": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/content-codecs": "workspace:*",
+    "@git-native-cms/integrations": "workspace:*",
+    "@git-native-cms/mcp": "workspace:*",
+    "@git-native-cms/migrations": "workspace:*",
+    "@git-native-cms/release-builder": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

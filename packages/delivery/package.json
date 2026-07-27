@@ -1,0 +1,26 @@
+{
+  "name": "@git-native-cms/delivery",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "catalog:",
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/content-codecs": "workspace:*",
+    "@git-native-cms/core": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

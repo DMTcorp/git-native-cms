@@ -1,0 +1,34 @@
+{
+  "name": "@git-native-cms/playground-astro",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --port 3001",
+    "build": "astro build",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/react": "latest",
+    "@astrojs/vercel": "latest",
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/editor": "workspace:*",
+    "@git-native-cms/editor-bridge": "workspace:*",
+    "@git-native-cms/editor-ui": "workspace:*",
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/react": "workspace:*",
+    "@git-native-cms/schema": "workspace:*",
+    "@git-native-cms/server": "workspace:*",
+    "@git-native-cms/testing": "workspace:*",
+    "astro": "latest",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@astrojs/check": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "^6.0.0"
+  }
+}

@@ -1,0 +1,10 @@
+id: global_primary_navigation
+type: navigation
+schemaVersion: 1
+items:
+  - id: nav_home
+    href: /
+    label: Home
+  - id: nav_journal
+    href: /journal
+    label: Journal

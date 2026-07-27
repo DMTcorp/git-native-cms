@@ -1,0 +1,28 @@
+{
+  "name": "@git-native-cms/github",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/git": "workspace:*",
+    "@octokit/app": "catalog:",
+    "@octokit/core": "catalog:",
+    "@octokit/webhooks": "catalog:"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

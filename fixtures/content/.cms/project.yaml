@@ -1,0 +1,6 @@
+configVersion: 1
+name: Fieldnotes sandbox
+defaultLocale: en-US
+mainBranch: main
+stagingBranch: staging
+contentRoot: content

@@ -1,0 +1,31 @@
+{
+  "name": "@git-native-cms/application",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./ports": {
+      "types": "./dist/ports.d.ts",
+      "import": "./dist/ports.js"
+    }
+  },
+  "dependencies": {
+    "@git-native-cms/content-codecs": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/document-model": "workspace:*",
+    "@git-native-cms/git": "workspace:*",
+    "@git-native-cms/permissions": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

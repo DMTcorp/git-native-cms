@@ -1,0 +1,13 @@
+.astro
+.next
+.pnpm-store
+.turbo
+.vercel
+coverage
+dist
+node_modules
+playwright-report
+test-results
+
+# The product contract is maintained as a standalone source document.
+git-native-visual-cms-implementation-plan.md

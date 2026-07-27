@@ -1,0 +1,18 @@
+---
+import "../styles/site.css";
+import { PreviewDemo } from "../components/PreviewDemo";
+
+const isPreview = (Astro.params.slug ?? "").startsWith("__cms/preview");
+if (!isPreview) Astro.response.status = 404;
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Preview · Astro playground</title>
+  </head>
+  <body>
+    {isPreview ? <PreviewDemo client:load /> : <main><h1>Not found</h1></main>}
+  </body>
+</html>

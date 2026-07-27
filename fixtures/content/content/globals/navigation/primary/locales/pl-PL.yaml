@@ -1,0 +1,6 @@
+locale: pl-PL
+fields:
+  nav_home:
+    label: Start
+  nav_journal:
+    label: Dziennik

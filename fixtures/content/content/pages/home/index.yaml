@@ -1,0 +1,19 @@
+id: doc_home
+type: pages
+schemaVersion: 1
+route:
+  path: /
+title: Homepage
+sections:
+  - id: sec_hero
+    type: hero
+    version: 1
+    heading: Editorial work, without the machinery showing.
+    description: Build pages with real frontend components.
+  - id: sec_plans
+    type: pricingGrid
+    version: 1
+    heading: Plans that grow with the team
+    bindings:
+      plans:
+        collection: plans

@@ -1,0 +1,5 @@
+locale: en-US
+fields:
+  sec_hero:
+    heading: Editorial work, without the machinery showing.
+    description: Build pages with real frontend components.

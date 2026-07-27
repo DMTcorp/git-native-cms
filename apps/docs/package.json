@@ -1,0 +1,19 @@
+{
+  "name": "@git-native-cms/docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --port 4321",
+    "build": "astro build",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "latest",
+    "astro": "latest"
+  },
+  "devDependencies": {
+    "@astrojs/check": "latest",
+    "typescript": "^6.0.0"
+  }
+}

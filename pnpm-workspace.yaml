@@ -1,0 +1,28 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "tooling/*"
+allowBuilds:
+  cpu-features: true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+  ssh2: true
+
+catalog:
+  "@aws-sdk/client-s3": "latest"
+  "@aws-sdk/s3-request-presigner": "latest"
+  "@modelcontextprotocol/sdk": "latest"
+  "@octokit/app": "latest"
+  "@octokit/core": "latest"
+  "@octokit/oauth-app": "latest"
+  "@octokit/webhooks": "latest"
+  "@tanstack/react-query": "latest"
+  "@tanstack/react-router": "latest"
+  "@tanstack/react-virtual": "latest"
+  "ajv": "latest"
+  "jose": "latest"
+  "react": "latest"
+  "react-dom": "latest"
+  "yaml": "latest"
+confirmModulesPurge: false

@@ -1,0 +1,6 @@
+version: 1
+default:
+  changeTarget: staging
+  productionSource: staging
+  requiredApprovals: 1
+  deleteChangeBranch: true

@@ -1,0 +1,16 @@
+roles:
+  editors:
+    githubTeams:
+      - content-editors
+    grants:
+      - change.create
+      - change.edit
+      - change.submit
+  publishers:
+    githubTeams:
+      - content-publishers
+    grants:
+      - change.approve
+      - staging.add
+      - staging.publish
+      - release.rollback

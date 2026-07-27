@@ -1,0 +1,8 @@
+id: plan_lite
+type: plans
+schemaVersion: 1
+slug: lite
+status: active
+price:
+  amount: 1900
+  currency: USD

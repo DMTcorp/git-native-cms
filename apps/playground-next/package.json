@@ -1,0 +1,32 @@
+{
+  "name": "@git-native-cms/playground-next",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/editor": "workspace:*",
+    "@git-native-cms/editor-bridge": "workspace:*",
+    "@git-native-cms/editor-ui": "workspace:*",
+    "@git-native-cms/next": "workspace:*",
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/react": "workspace:*",
+    "@git-native-cms/schema": "workspace:*",
+    "@git-native-cms/server": "workspace:*",
+    "@git-native-cms/testing": "workspace:*",
+    "next": "latest",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "^6.0.0"
+  }
+}

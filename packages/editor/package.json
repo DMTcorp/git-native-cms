@@ -1,0 +1,41 @@
+{
+  "name": "@git-native-cms/editor",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/document-model": "workspace:*",
+    "@git-native-cms/editor-ui": "workspace:*",
+    "@git-native-cms/protocol": "workspace:*",
+    "@tanstack/react-query": "catalog:",
+    "@tanstack/react-router": "catalog:",
+    "@tanstack/react-virtual": "catalog:",
+    "lexical": "latest",
+    "react-hook-form": "latest",
+    "zustand": "latest"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
+  },
+  "devDependencies": {
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

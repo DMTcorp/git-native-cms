@@ -1,0 +1,6 @@
+locale: pl-PL
+status: reviewed
+fields:
+  sec_hero:
+    heading: Praca redakcyjna bez pokazywania całej maszynerii.
+    description: Buduj strony z prawdziwych komponentów frontendu.

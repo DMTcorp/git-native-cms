@@ -1,0 +1,33 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./packages/core/tsconfig.json" },
+    { "path": "./packages/schema/tsconfig.json" },
+    { "path": "./packages/protocol/tsconfig.json" },
+    { "path": "./packages/document-model/tsconfig.json" },
+    { "path": "./packages/content-codecs/tsconfig.json" },
+    { "path": "./packages/permissions/tsconfig.json" },
+    { "path": "./packages/git/tsconfig.json" },
+    { "path": "./packages/application/tsconfig.json" },
+    { "path": "./packages/content-repository/tsconfig.json" },
+    { "path": "./packages/release-builder/tsconfig.json" },
+    { "path": "./packages/delivery/tsconfig.json" },
+    { "path": "./packages/server/tsconfig.json" },
+    { "path": "./packages/auth/tsconfig.json" },
+    { "path": "./packages/sessions/tsconfig.json" },
+    { "path": "./packages/assets/tsconfig.json" },
+    { "path": "./packages/seo/tsconfig.json" },
+    { "path": "./packages/localization/tsconfig.json" },
+    { "path": "./packages/search/tsconfig.json" },
+    { "path": "./packages/integrations/tsconfig.json" },
+    { "path": "./packages/mcp/tsconfig.json" },
+    { "path": "./packages/cli/tsconfig.json" },
+    { "path": "./packages/react/tsconfig.json" },
+    { "path": "./packages/editor-bridge/tsconfig.json" },
+    { "path": "./packages/editor-ui/tsconfig.json" },
+    { "path": "./packages/editor/tsconfig.json" },
+    { "path": "./packages/next/tsconfig.json" },
+    { "path": "./packages/astro/tsconfig.json" }
+  ]
+}

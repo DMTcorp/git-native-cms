@@ -1,0 +1,48 @@
+{
+  "name": "git-native-cms",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Git-native visual CMS for Next.js and Astro.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.0.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "eslint .",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "architecture": "dependency-cruiser packages --config dependency-cruiser.cjs",
+    "budgets": "node tooling/scripts/check-bundle-budgets.mjs",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm architecture && pnpm build && pnpm budgets",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset publish",
+    "cms": "tsx packages/cli/src/bin.ts"
+  },
+  "devDependencies": {
+    "@changesets/cli": "latest",
+    "@eslint/js": "latest",
+    "@playwright/test": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "dependency-cruiser": "latest",
+    "eslint": "latest",
+    "eslint-plugin-boundaries": "latest",
+    "fast-check": "latest",
+    "prettier": "latest",
+    "testcontainers": "latest",
+    "tsx": "latest",
+    "turbo": "latest",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "latest",
+    "vitest": "latest"
+  }
+}

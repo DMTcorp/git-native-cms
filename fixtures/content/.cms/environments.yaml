@@ -1,0 +1,5 @@
+environments:
+  staging:
+    pointer: environments/staging/current.json
+  production:
+    pointer: environments/production/current.json

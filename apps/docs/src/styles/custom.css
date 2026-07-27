@@ -1,0 +1,28 @@
+:root {
+  --sl-color-accent-low: #e3e9ff;
+  --sl-color-accent: #315efb;
+  --sl-color-accent-high: #16235d;
+  --sl-color-white: #17212b;
+  --sl-color-gray-1: #2f3b47;
+  --sl-color-gray-2: #566474;
+  --sl-color-gray-3: #8793a0;
+  --sl-color-gray-4: #cbd3dc;
+  --sl-color-gray-5: #e5eaf0;
+  --sl-color-gray-6: #f0f3f6;
+  --sl-color-black: #f7f8fa;
+  --sl-font: "Atkinson Hyperlegible", system-ui, sans-serif;
+  --sl-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+:root[data-theme="dark"] {
+  --sl-color-white: #f3f6f8;
+  --sl-color-black: #111820;
+  --sl-color-gray-6: #18212a;
+  --sl-color-gray-5: #202a35;
+}
+
+.hero h1 {
+  font-family: "Source Serif 4", Georgia, serif;
+  font-weight: 540;
+  letter-spacing: -0.045em;
+}
