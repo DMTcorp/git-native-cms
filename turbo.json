@@ -6,7 +6,7 @@
       "outputs": ["dist/**", ".next/**", ".astro/**"]
     },
     "typecheck": {
-      "dependsOn": ["^typecheck"],
+      "dependsOn": ["^build", "^typecheck"],
       "outputs": []
     },
     "test": {

@@ -106,19 +106,20 @@ export class RotatingCookieSessionService {
       readonly absoluteTtlMs?: number;
       readonly idleTtlMs?: number;
       readonly secure?: boolean;
-      readonly revokeGitHubToken?: (actor: Actor) => Promise<void>;
+      readonly revokeGitHubToken?: (accessToken: string, actor: Actor) => Promise<void>;
     } = {},
   ) {
     this.codec = new EncryptedCookieSessionCodec(secret);
   }
 
-  async issue(actor: Actor, now = new Date()): Promise<SessionIssue> {
+  async issue(actor: Actor, now = new Date(), githubAccessToken?: string): Promise<SessionIssue> {
     const absoluteTtlMs = this.options.absoluteTtlMs ?? 8 * 60 * 60_000;
     const idleTtlMs = this.options.idleTtlMs ?? 60 * 60_000;
     const csrfToken = randomToken(32);
     const session: SessionRecord = {
       id: `ses_${randomToken(20)}`,
       actor,
+      ...(githubAccessToken === undefined ? {} : { githubAccessToken }),
       csrfSecret: csrfToken,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + absoluteTtlMs).toISOString(),
@@ -152,11 +153,29 @@ export class RotatingCookieSessionService {
     return this.encodeIssue(rotated, current.csrfSecret, now);
   }
 
+  async read(token: string, now = new Date()): Promise<SessionRecord> {
+    const session = await this.codec.decode(token, now);
+    if (
+      new Date(session.expiresAt).getTime() <= now.getTime() ||
+      new Date(session.idleExpiresAt).getTime() <= now.getTime()
+    ) {
+      throw new CmsError({
+        code: "CMS_AUTH_007",
+        message: "The session expired due to inactivity.",
+        category: "authentication",
+        retryable: true,
+      });
+    }
+    return session;
+  }
+
   async logout(token: string | undefined, now = new Date()): Promise<string> {
     if (token !== undefined && this.options.revokeGitHubToken !== undefined) {
       try {
         const session = await this.codec.decode(token, now);
-        await this.options.revokeGitHubToken(session.actor);
+        if (session.githubAccessToken !== undefined) {
+          await this.options.revokeGitHubToken(session.githubAccessToken, session.actor);
+        }
       } catch {
         // Logout remains successful for stale or malformed cookies.
       }

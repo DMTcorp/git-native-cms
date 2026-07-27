@@ -70,9 +70,7 @@ export function createPreviewBridge(options: PreviewBridgeOptions): {
     "navigation",
     "viewport-context",
   ];
-  const overlay = document.createElement(
-    "cms-preview-overlay",
-  ) as CmsPreviewOverlayElement;
+  const overlay = document.createElement("cms-preview-overlay") as CmsPreviewOverlayElement;
   document.documentElement.append(overlay);
   let port: MessagePort | undefined;
 
@@ -82,6 +80,7 @@ export function createPreviewBridge(options: PreviewBridgeOptions): {
     if (message.protocolVersion !== "1.0.0") return;
     switch (message.type) {
       case "editor.initialize":
+        options.setDocument(message.payload.document);
         send({
           protocolVersion: "1.0.0",
           type: "preview.document-loaded",

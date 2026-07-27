@@ -254,8 +254,18 @@
     min-height: 0;
     grid-template-rows: 42px minmax(0, 1fr);
     background:
-      linear-gradient(45deg, color-mix(in srgb, var(--cms-line) 20%, transparent) 25%, transparent 25%) 0 0 / 18px 18px,
-      linear-gradient(-45deg, color-mix(in srgb, var(--cms-line) 20%, transparent) 25%, transparent 25%) 0 9px / 18px 18px,
+      linear-gradient(
+          45deg,
+          color-mix(in srgb, var(--cms-line) 20%, transparent) 25%,
+          transparent 25%
+        )
+        0 0 / 18px 18px,
+      linear-gradient(
+          -45deg,
+          color-mix(in srgb, var(--cms-line) 20%, transparent) 25%,
+          transparent 25%
+        )
+        0 9px / 18px 18px,
       var(--cms-chrome);
   }
 
@@ -305,7 +315,9 @@
     border: 0;
     border-radius: 9px;
     background: white;
-    box-shadow: 0 14px 44px rgb(23 33 43 / 18%), 0 0 0 1px rgb(23 33 43 / 8%);
+    box-shadow:
+      0 14px 44px rgb(23 33 43 / 18%),
+      0 0 0 1px rgb(23 33 43 / 8%);
     transition: width 180ms ease;
   }
 
@@ -410,7 +422,10 @@
     color: var(--cms-ink);
     font: 650 13px/1 var(--cms-font-ui);
     cursor: pointer;
-    transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
+    transition:
+      border-color 120ms ease,
+      transform 120ms ease,
+      background 120ms ease;
   }
 
   .cms-button:hover {
@@ -564,6 +579,61 @@
     font: 700 10px/1 var(--cms-font-data);
     letter-spacing: 0.08em;
     text-transform: uppercase;
+  }
+
+  .cms-login {
+    display: grid;
+    min-height: 100dvh;
+    place-items: center;
+    padding: 32px;
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--cms-change) 8%, transparent),
+        transparent 45%
+      ),
+      var(--cms-paper);
+  }
+
+  .cms-login__card {
+    display: grid;
+    width: min(100%, 560px);
+    gap: 18px;
+    border: 1px solid var(--cms-line);
+    border-radius: 18px;
+    padding: clamp(28px, 6vw, 64px);
+    background: var(--cms-panel);
+    box-shadow: 0 32px 90px rgb(23 33 43 / 12%);
+  }
+
+  .cms-login__card h1 {
+    max-width: 480px;
+    margin: 0;
+    font: 550 clamp(40px, 7vw, 68px)/0.96 var(--cms-font-title);
+    letter-spacing: -0.045em;
+  }
+
+  .cms-login__card p,
+  .cms-login__card small {
+    margin: 0;
+    color: var(--cms-muted);
+  }
+
+  .cms-login__eyebrow {
+    color: var(--cms-change);
+    font: 700 11px/1 var(--cms-font-data);
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+
+  .cms-login__action {
+    justify-self: start;
+    border-radius: 8px;
+    padding: 12px 17px;
+    background: var(--cms-change);
+    color: white;
+    font-weight: 750;
+    text-decoration: none;
   }
 }
 

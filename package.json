@@ -37,6 +37,7 @@
     "eslint": "latest",
     "eslint-plugin-boundaries": "latest",
     "fast-check": "latest",
+    "jose": "catalog:",
     "prettier": "latest",
     "testcontainers": "latest",
     "tsx": "latest",

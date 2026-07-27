@@ -1,8 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const nextPort = Number(process.env.CMS_E2E_NEXT_PORT ?? "41731");
+const astroPort = Number(process.env.CMS_E2E_ASTRO_PORT ?? "41732");
+
 const frameworks = [
-  { name: "next", baseURL: "http://127.0.0.1:3000" },
-  { name: "astro", baseURL: "http://127.0.0.1:3001" },
+  { name: "next", baseURL: `http://127.0.0.1:${nextPort}` },
+  { name: "astro", baseURL: `http://127.0.0.1:${astroPort}` },
 ] as const;
 
 const browsers = [
@@ -35,17 +38,15 @@ export default defineConfig({
   ),
   webServer: [
     {
-      command:
-        "pnpm --filter @git-native-cms/playground-next exec next dev --hostname 127.0.0.1 --port 3000",
-      url: "http://127.0.0.1:3000",
-      reuseExistingServer: !process.env.CI,
+      command: `pnpm --filter @git-native-cms/playground-next exec next dev --hostname 127.0.0.1 --port ${nextPort}`,
+      url: `http://127.0.0.1:${nextPort}`,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
     {
-      command:
-        "ASTRO_DEV_BACKGROUND=1 pnpm --filter @git-native-cms/playground-astro exec astro dev --host 127.0.0.1 --port 3001 --force",
-      url: "http://127.0.0.1:3001",
-      reuseExistingServer: !process.env.CI,
+      command: `ASTRO_DEV_BACKGROUND=1 pnpm --filter @git-native-cms/playground-astro exec astro dev --host 127.0.0.1 --port ${astroPort} --force`,
+      url: `http://127.0.0.1:${astroPort}`,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
   ],

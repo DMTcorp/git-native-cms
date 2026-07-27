@@ -1,6 +1,9 @@
 ---
 import "@git-native-cms/editor-ui/styles.css";
+import { hostedRuntime } from "../../cms-runtime";
 import { CmsDemo } from "../../components/CmsDemo";
+
+const state = await hostedRuntime.editorState(Astro.request);
 ---
 
 <html lang="en">
@@ -9,5 +12,5 @@ import { CmsDemo } from "../../components/CmsDemo";
     <meta name="viewport" content="width=device-width" />
     <title>CMS · Astro playground</title>
   </head>
-  <body><CmsDemo client:load /></body>
+  <body><CmsDemo state={state} client:load /></body>
 </html>

@@ -1,4 +1,4 @@
 import type { APIRoute } from "astro";
-import { cmsServer } from "../../../cms-runtime";
+import { hostedRuntime } from "../../../cms-runtime";
 
-export const ALL: APIRoute = ({ request }) => cmsServer.handle(request);
+export const ALL: APIRoute = async ({ request }) => await hostedRuntime.handle(request);

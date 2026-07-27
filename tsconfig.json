@@ -16,6 +16,7 @@
     { "path": "./packages/server/tsconfig.json" },
     { "path": "./packages/auth/tsconfig.json" },
     { "path": "./packages/sessions/tsconfig.json" },
+    { "path": "./packages/hosted-runtime/tsconfig.json" },
     { "path": "./packages/assets/tsconfig.json" },
     { "path": "./packages/seo/tsconfig.json" },
     { "path": "./packages/localization/tsconfig.json" },

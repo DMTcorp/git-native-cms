@@ -1,0 +1,35 @@
+{
+  "name": "@git-native-cms/hosted-runtime",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "catalog:",
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/auth": "workspace:*",
+    "@git-native-cms/content-codecs": "workspace:*",
+    "@git-native-cms/content-repository": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/delivery": "workspace:*",
+    "@git-native-cms/github": "workspace:*",
+    "@git-native-cms/integrations": "workspace:*",
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/server": "workspace:*",
+    "@git-native-cms/sessions": "workspace:*",
+    "jose": "catalog:"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

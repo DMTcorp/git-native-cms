@@ -1,8 +1,27 @@
 import type { Revision } from "@git-native-cms/core";
 import { EditorApp } from "@git-native-cms/editor";
-import { change, document } from "../cms-fixture";
+import type { HostedEditorState } from "@git-native-cms/hosted-runtime";
 
-export function CmsDemo() {
+export function CmsDemo(props: { readonly state: HostedEditorState }) {
+  if (!props.state.authenticated) {
+    return (
+      <main className="cms-app cms-login">
+        <div className="cms-login__card">
+          <span className="cms-login__eyebrow">Hosted sandbox</span>
+          <h1>Open the real Git-backed editor.</h1>
+          <p>
+            Sign in with GitHub. The CMS creates an isolated Change branch in the public content
+            repository and keeps credentials server-side.
+          </p>
+          <a className="cms-login__action" href={props.state.loginUrl}>
+            Continue with GitHub
+          </a>
+          <small>{props.state.projectName}</small>
+        </div>
+      </main>
+    );
+  }
+  const { change, document, csrfToken } = props.state;
   return (
     <EditorApp
       change={change}
@@ -14,7 +33,7 @@ export function CmsDemo() {
           headers: {
             "content-type": "application/json",
             "idempotency-key": globalThis.crypto.randomUUID(),
-            "x-csrf-token": "sandbox",
+            "x-csrf-token": csrfToken,
           },
           body: JSON.stringify({ expectedRevision, patches }),
         });

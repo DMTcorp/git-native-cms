@@ -215,6 +215,7 @@ export interface AssetStore {
 export interface SessionRecord {
   readonly id: string;
   readonly actor: Actor;
+  readonly githubAccessToken?: string;
   readonly csrfSecret: string;
   readonly createdAt: string;
   readonly expiresAt: string;
