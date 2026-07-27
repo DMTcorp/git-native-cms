@@ -11,7 +11,7 @@ describe.skipIf(!runContainerTests)("S3 asset contract", () => {
   let container: StartedTestContainer | undefined;
   let client: S3Client | undefined;
   const bucket = "cms-assets";
-  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const actor: Actor = {
     id: "act_asset_contract" as Actor["id"],
     githubId: 1,
