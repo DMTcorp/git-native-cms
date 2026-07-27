@@ -17,7 +17,7 @@
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "turbo run build --filter=@git-native-cms/playground-next --filter=@git-native-cms/playground-astro && playwright test",
     "architecture": "dependency-cruiser packages --config dependency-cruiser.cjs",
     "budgets": "node tooling/scripts/check-bundle-budgets.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm architecture && pnpm build && pnpm budgets",
