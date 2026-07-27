@@ -17,6 +17,9 @@
     "./styles.css": "./dist/styles.css"
   },
   "dependencies": {
+    "@fontsource/atkinson-hyperlegible": "catalog:",
+    "@fontsource/ibm-plex-mono": "catalog:",
+    "@fontsource/source-serif-4": "catalog:",
     "react-aria-components": "latest"
   },
   "peerDependencies": {
