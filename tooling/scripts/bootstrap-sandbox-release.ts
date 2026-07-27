@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { Actor, ActorId, GitCommitSha } from "../../packages/core/src/index.js";
 import { RotatingCookieSessionService } from "../../packages/sessions/src/index.js";
 
@@ -14,7 +15,11 @@ function option(name: string): string | undefined {
 const origin = (option("--origin") ?? "https://git-native-cms-next.vercel.app").replace(/\/$/u, "");
 const owner = option("--owner") ?? "DMTcorp";
 const repository = option("--repository") ?? "git-native-cms-sandbox-content";
-const secret = required(process.env.CMS_SESSION_SECRET, "CMS_SESSION_SECRET");
+const secretPath = option("--session-secret-file");
+const secret =
+  secretPath === undefined
+    ? required(process.env.CMS_SESSION_SECRET, "CMS_SESSION_SECRET")
+    : required((await readFile(secretPath, "utf8")).trim(), "session secret file");
 
 const refResponse = await fetch(
   `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/git/ref/heads/main`,
