@@ -286,6 +286,11 @@ const page = await createDocument(
   {
     title: `Acceptance page ${runId}`,
     route: { path: `/acceptance-${runId}` },
+    redirectFrom: [`/acceptance-before-${runId}`],
+    seo: {
+      title: `Live acceptance ${runId}`,
+      description: "A production verification page for localized Git-native content.",
+    },
     sections: [
       {
         id: `hero-${runId}`,
@@ -572,6 +577,38 @@ const releasedPageSource = await releasedPageResponse.text();
 if (!releasedPageResponse.ok || !releasedPageSource.includes(storedAsset.asset.id)) {
   throw new Error("The immutable CDN page does not contain the stable R2 asset reference.");
 }
+const redirectsResponse = await fetch(
+  `${releasesOrigin}/releases/${published.releaseId}/redirects.json`,
+  { signal: AbortSignal.timeout(15_000) },
+);
+const redirects = (await redirectsResponse.json()) as Readonly<Record<string, string>>;
+if (!redirectsResponse.ok || redirects[`/acceptance-before-${runId}`] !== `/acceptance-${runId}`) {
+  throw new Error("The immutable release does not contain the slug-change redirect.");
+}
+const localesResponse = await fetch(
+  `${releasesOrigin}/releases/${published.releaseId}/locales.json`,
+  { signal: AbortSignal.timeout(15_000) },
+);
+const localesSource = await localesResponse.text();
+if (
+  !localesResponse.ok ||
+  !localesSource.includes('"pl-PL"') ||
+  !localesSource.includes(`Strona akceptacyjna ${runId}`)
+) {
+  throw new Error("The immutable release does not contain the pl-PL localized content.");
+}
+const sitemapResponse = await fetch(
+  `${releasesOrigin}/releases/${published.releaseId}/sitemap.xml`,
+  { signal: AbortSignal.timeout(15_000) },
+);
+const sitemap = await sitemapResponse.text();
+if (
+  !sitemapResponse.ok ||
+  !sitemap.includes('hreflang="pl-PL"') ||
+  !sitemap.includes(`/pl-PL/akceptacja-${runId}`)
+) {
+  throw new Error("The immutable release does not contain the expected hreflang alternate.");
+}
 try {
   await api(
     reviewerSession,
@@ -636,6 +673,7 @@ process.stdout.write(
     `READY asset ${storedAsset.asset.id}`,
     `READY staging release ${stagingRelease.releaseId}`,
     `READY release ${published.releaseId}`,
+    `READY locale pl-PL, hreflang and redirect /acceptance-before-${runId}`,
     `READY rollback ${baseline.releaseId} and restore ${restored.releaseId}`,
   ].join("\n") + "\n",
 );
