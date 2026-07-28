@@ -14,8 +14,12 @@
     }
   },
   "dependencies": {
+    "@dnd-kit/core": "catalog:",
+    "@dnd-kit/sortable": "catalog:",
+    "@dnd-kit/utilities": "catalog:",
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/diff": "workspace:*",
     "@git-native-cms/document-model": "workspace:*",
     "@git-native-cms/editor-ui": "workspace:*",
     "@git-native-cms/protocol": "workspace:*",

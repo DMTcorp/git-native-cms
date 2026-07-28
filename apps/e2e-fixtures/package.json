@@ -1,0 +1,33 @@
+{
+  "name": "@git-native-cms/e2e-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/content-codecs": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
+    "@git-native-cms/document-model": "workspace:*",
+    "@git-native-cms/hosted-runtime": "workspace:*",
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/release-builder": "workspace:*",
+    "@git-native-cms/server": "workspace:*",
+    "@git-native-cms/testing": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.0",
+    "vitest": "latest"
+  }
+}

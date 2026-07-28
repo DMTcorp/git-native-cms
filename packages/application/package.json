@@ -22,7 +22,10 @@
     "@git-native-cms/core": "workspace:*",
     "@git-native-cms/document-model": "workspace:*",
     "@git-native-cms/git": "workspace:*",
-    "@git-native-cms/permissions": "workspace:*"
+    "@git-native-cms/localization": "workspace:*",
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/search": "workspace:*",
+    "@git-native-cms/seo": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

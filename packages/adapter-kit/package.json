@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
     "@git-native-cms/testing": "workspace:*"
   },
   "scripts": {

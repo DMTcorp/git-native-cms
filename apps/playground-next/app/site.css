@@ -1,3 +1,8 @@
+@import "@fontsource/atkinson-hyperlegible/latin-400.css";
+@import "@fontsource/atkinson-hyperlegible/latin-700.css";
+@import "@fontsource/source-serif-4/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-700.css";
+
 :root {
   color: #17212b;
   background: #f7f8fa;
@@ -108,6 +113,31 @@ body {
   list-style: none;
 }
 
+.hero__media {
+  position: relative;
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid #cbd3dc;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 20px 55px rgb(23 33 43 / 12%);
+}
+
+.hero__media img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.hero__media figcaption {
+  padding: 10px 12px;
+  color: #627080;
+  font:
+    700 10px/1.2 "IBM Plex Mono",
+    monospace;
+}
+
 .hero__proof li {
   display: flex;
   gap: 12px;
@@ -136,6 +166,28 @@ body {
     Georgia,
     serif;
   letter-spacing: -0.035em;
+}
+
+.pricing-grid__items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.pricing-grid__items article {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #cbd3dc;
+  border-radius: 12px;
+  padding: 22px;
+  background: white;
+}
+
+.pricing-grid__items article span {
+  color: #147a5a;
+  font:
+    700 13px/1 "IBM Plex Mono",
+    monospace;
 }
 
 @media (max-width: 800px) {

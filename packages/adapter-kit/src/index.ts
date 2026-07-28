@@ -28,3 +28,5 @@ export async function verifyIdempotent<TResult>(
     ...(passed ? {} : { details: "Repeated calls returned different results." }),
   };
 }
+
+export * from "./contracts.js";

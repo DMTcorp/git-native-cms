@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
     }
   },
   "dependencies": {
@@ -18,6 +22,10 @@
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/content-codecs": "workspace:*",
     "@git-native-cms/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@git-native-cms/adapter-kit": "workspace:*",
+    "@git-native-cms/testing": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

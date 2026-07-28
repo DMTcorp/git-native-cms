@@ -16,6 +16,7 @@
   "dependencies": {
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/content-codecs": "workspace:*",
+    "@git-native-cms/content-repository": "workspace:*",
     "@git-native-cms/core": "workspace:*",
     "@git-native-cms/document-model": "workspace:*",
     "@git-native-cms/permissions": "workspace:*"

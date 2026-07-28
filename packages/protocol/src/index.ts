@@ -1,6 +1,7 @@
 import AjvModule, { type ValidateFunction } from "ajv";
+import { PROTOCOL_VERSION } from "./constants.js";
 
-export const PROTOCOL_VERSION = "1.0.0";
+export { PROTOCOL_VERSION } from "./constants.js";
 
 export interface ProtocolEnvelope<TType extends string, TPayload> {
   readonly protocolVersion: string;
@@ -50,16 +51,32 @@ export const protocolEnvelopeSchema = {
 
 let validator: ValidateFunction | undefined;
 
-export function isProtocolEnvelope(value: unknown): value is ProtocolEnvelope<string, unknown> {
+function protocolAjv(): { compile(schema: unknown): ValidateFunction } {
   const AjvConstructor = AjvModule as unknown as new (options: {
     readonly strict: boolean;
-    readonly formats: Readonly<Record<string, true>>;
+    readonly formats: Readonly<Record<string, { readonly validate: (value: string) => boolean }>>;
   }) => { compile(schema: unknown): ValidateFunction };
-  const current =
-    validator ??
-    new AjvConstructor({ strict: true, formats: { "date-time": true } }).compile(
-      protocolEnvelopeSchema,
-    );
+  return new AjvConstructor({
+    strict: true,
+    formats: {
+      "date-time": {
+        validate: (value: string) =>
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(value) &&
+          !Number.isNaN(Date.parse(value)),
+      },
+    },
+  });
+}
+
+export function compileProtocolSchema<TValue>(
+  schema: unknown,
+): (value: unknown) => value is TValue {
+  const compiled = protocolAjv().compile(schema);
+  return (value: unknown): value is TValue => compiled(value);
+}
+
+export function isProtocolEnvelope(value: unknown): value is ProtocolEnvelope<string, unknown> {
+  const current = validator ?? protocolAjv().compile(protocolEnvelopeSchema);
   validator = current;
   return current(value);
 }

@@ -1,0 +1,41 @@
+---
+import { createAstroRegistry, renderAstroSections } from "@git-native-cms/astro-renderer";
+
+const registry = createAstroRegistry({
+  hero: (section) => `
+    <section class="hero">
+      <span>Astro static delivery</span>
+      <h1>${String(section.heading)}</h1>
+      <p>${String(section.description)}</p>
+    </section>
+  `,
+});
+const html = await renderAstroSections({
+  registry,
+  sections: [
+    {
+      id: "sec_static_hero",
+      type: "hero",
+      version: 1,
+      heading: "Immutable content at build time",
+      description: "Static Astro supports delivery builds; the full visual editor requires SSR.",
+    },
+  ],
+});
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Astro static · Git-native CMS</title>
+    <style>
+      :root { color: #17212b; background: #f7f8fa; font-family: system-ui, sans-serif; }
+      body { margin: 0; }
+      main { width: min(880px, calc(100% - 40px)); margin: 15vh auto; }
+      .hero { padding: clamp(32px, 8vw, 96px); border: 1px solid #e5eaf0; border-radius: 24px; background: white; }
+      h1 { max-width: 16ch; font: 700 clamp(2.5rem, 8vw, 5rem) / .98 Georgia, serif; }
+    </style>
+  </head>
+  <body><main set:html={html} /></body>
+</html>

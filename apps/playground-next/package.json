@@ -9,13 +9,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource/atkinson-hyperlegible": "catalog:",
+    "@fontsource/ibm-plex-mono": "catalog:",
+    "@fontsource/source-serif-4": "catalog:",
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/core": "workspace:*",
     "@git-native-cms/delivery": "workspace:*",
     "@git-native-cms/editor": "workspace:*",
     "@git-native-cms/editor-bridge": "workspace:*",
     "@git-native-cms/editor-ui": "workspace:*",
+    "@git-native-cms/e2e-fixtures": "workspace:*",
     "@git-native-cms/hosted-runtime": "workspace:*",
+    "@git-native-cms/localization": "workspace:*",
     "@git-native-cms/next": "workspace:*",
     "@git-native-cms/permissions": "workspace:*",
     "@git-native-cms/react": "workspace:*",
@@ -24,7 +29,8 @@
     "@git-native-cms/testing": "workspace:*",
     "next": "latest",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "sharp": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",

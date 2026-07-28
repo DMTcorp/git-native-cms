@@ -16,8 +16,11 @@
   "dependencies": {
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/core": "workspace:*",
-    "@git-native-cms/protocol": "workspace:*",
-    "@modelcontextprotocol/sdk": "catalog:"
+    "@git-native-cms/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@git-native-cms/permissions": "workspace:*",
+    "@git-native-cms/testing": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

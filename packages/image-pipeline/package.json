@@ -14,9 +14,9 @@
     }
   },
   "dependencies": {
-    "@git-native-cms/core": "workspace:*"
-  },
-  "optionalDependencies": {
+    "@aws-sdk/client-s3": "catalog:",
+    "@git-native-cms/application": "workspace:*",
+    "@git-native-cms/core": "workspace:*",
     "sharp": "latest"
   },
   "scripts": {

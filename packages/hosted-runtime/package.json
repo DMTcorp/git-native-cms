@@ -15,23 +15,42 @@
     "./client": {
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
     }
   },
   "dependencies": {
     "@aws-sdk/client-s3": "catalog:",
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/auth": "workspace:*",
+    "@git-native-cms/assets": "workspace:*",
     "@git-native-cms/content-codecs": "workspace:*",
     "@git-native-cms/content-repository": "workspace:*",
     "@git-native-cms/core": "workspace:*",
     "@git-native-cms/delivery": "workspace:*",
+    "@git-native-cms/editor": "workspace:*",
+    "@git-native-cms/editor-bridge": "workspace:*",
     "@git-native-cms/github": "workspace:*",
+    "@git-native-cms/image-pipeline": "workspace:*",
     "@git-native-cms/integrations": "workspace:*",
+    "@git-native-cms/localization": "workspace:*",
+    "@git-native-cms/mcp": "workspace:*",
+    "@git-native-cms/observability": "workspace:*",
     "@git-native-cms/permissions": "workspace:*",
     "@git-native-cms/release-builder": "workspace:*",
+    "@git-native-cms/react": "workspace:*",
+    "@git-native-cms/search": "workspace:*",
+    "@git-native-cms/schema": "workspace:*",
     "@git-native-cms/server": "workspace:*",
     "@git-native-cms/sessions": "workspace:*",
-    "jose": "catalog:"
+    "jose": "catalog:",
+    "react": "catalog:"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

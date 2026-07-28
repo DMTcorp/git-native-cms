@@ -1,0 +1,26 @@
+:root {
+  color: #17212b;
+  background: #f7f8fa;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(920px, calc(100% - 40px));
+  margin: 15vh auto;
+}
+
+.hero {
+  padding: clamp(32px, 8vw, 96px);
+  border: 1px solid #e5eaf0;
+  border-radius: 24px;
+  background: white;
+}
+
+.hero h1 {
+  max-width: 16ch;
+  font: 700 clamp(2.5rem, 8vw, 5rem) / 0.98 Georgia, serif;
+}

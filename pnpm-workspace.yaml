@@ -9,10 +9,20 @@ allowBuilds:
   sharp: true
   ssh2: true
 
+overrides:
+  "@vercel/routing-utils>path-to-regexp": "6.3.0"
+  "next>postcss": "8.5.23"
+  "next>sharp": "0.35.3"
+
 catalog:
   "@aws-sdk/client-s3": "latest"
   "@aws-sdk/s3-request-presigner": "latest"
-  "@modelcontextprotocol/sdk": "latest"
+  "@dnd-kit/core": "latest"
+  "@dnd-kit/sortable": "latest"
+  "@dnd-kit/utilities": "latest"
+  "@fontsource/atkinson-hyperlegible": "latest"
+  "@fontsource/ibm-plex-mono": "latest"
+  "@fontsource/source-serif-4": "latest"
   "@octokit/app": "latest"
   "@octokit/core": "latest"
   "@octokit/oauth-app": "latest"
@@ -24,5 +34,6 @@ catalog:
   "jose": "latest"
   "react": "latest"
   "react-dom": "latest"
+  "testcontainers": "latest"
   "yaml": "latest"
 confirmModulesPurge: false

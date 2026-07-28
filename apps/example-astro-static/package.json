@@ -1,0 +1,19 @@
+{
+  "name": "@git-native-cms/example-astro-static",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "astro build",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@git-native-cms/astro": "workspace:*",
+    "@git-native-cms/astro-renderer": "workspace:*",
+    "astro": "latest"
+  },
+  "devDependencies": {
+    "@astrojs/check": "latest",
+    "typescript": "^6.0.0"
+  }
+}

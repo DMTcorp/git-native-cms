@@ -8,8 +8,11 @@ import { sandboxDocument } from "../cms.fixture";
 
 export function PreviewDemo() {
   const [document, setDocument] = useState(sandboxDocument.data);
+  const [content, setContent] = useState<readonly unknown[]>([]);
   const documentRef = useRef(document);
+  const contentRef = useRef(content);
   documentRef.current = document;
+  contentRef.current = content;
   useEffect(() => {
     const sessionId = new URLSearchParams(window.location.search).get("cmsSession");
     if (sessionId === null) return;
@@ -18,6 +21,8 @@ export function PreviewDemo() {
       sessionId,
       getDocument: () => documentRef.current,
       setDocument: (next) => setDocument(next as typeof document),
+      setContent,
+      getContent: () => contentRef.current,
     });
     return () => bridge.destroy();
   }, []);
@@ -26,6 +31,26 @@ export function PreviewDemo() {
       <CmsPageRenderer
         document={{ id: sandboxDocument.id, sections: document.sections }}
         registry={sandboxRegistry}
+        content={content.flatMap((value) => {
+          if (typeof value !== "object" || value === null) return [];
+          const item = value as {
+            readonly id?: unknown;
+            readonly type?: unknown;
+            readonly data?: unknown;
+          };
+          return typeof item.id === "string" &&
+            typeof item.type === "string" &&
+            typeof item.data === "object" &&
+            item.data !== null
+            ? [
+                {
+                  id: item.id,
+                  type: item.type,
+                  data: item.data as Readonly<Record<string, unknown>>,
+                },
+              ]
+            : [];
+        })}
         preview
       />
     </main>

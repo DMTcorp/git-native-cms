@@ -1,0 +1,25 @@
+{
+  "name": "@git-native-cms/example-next-enterprise",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@git-native-cms/editor-bridge": "workspace:*",
+    "@git-native-cms/hosted-runtime": "workspace:*",
+    "@git-native-cms/next": "workspace:*",
+    "@git-native-cms/react": "workspace:*",
+    "@git-native-cms/schema": "workspace:*",
+    "next": "latest",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "^6.0.0"
+  }
+}

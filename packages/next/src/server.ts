@@ -1,5 +1,11 @@
 import type { CmsServer } from "@git-native-cms/server";
 
+export {
+  createHostedCmsRuntime,
+  type HostedCmsRuntime,
+  type HostedRuntimeEnvironment,
+} from "@git-native-cms/hosted-runtime";
+
 export interface NextCmsRouteHandlers {
   readonly GET: (request: Request) => Promise<Response>;
   readonly POST: (request: Request) => Promise<Response>;

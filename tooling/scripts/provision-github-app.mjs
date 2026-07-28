@@ -57,13 +57,25 @@ const server = createServer(async (request, response) => {
           url: `${settings.origin}/api/cms/webhooks/github`,
         },
         default_permissions: {
-          checks: "read",
+          checks: "write",
           contents: "write",
+          deployments: "write",
           issues: "write",
+          members: "write",
           metadata: "read",
           pull_requests: "write",
         },
-        default_events: ["check_run", "pull_request", "push"],
+        default_events: [
+          "check_run",
+          "check_suite",
+          "deployment",
+          "deployment_status",
+          "installation_repositories",
+          "pull_request",
+          "pull_request_review",
+          "pull_request_review_comment",
+          "push",
+        ],
       };
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html>

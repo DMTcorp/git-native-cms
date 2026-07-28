@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { canonicalJson, markdownCodec, yamlCodec } from "./index.js";
+import {
+  canonicalJson,
+  markdownCodec,
+  parseContentWithDiagnostics,
+  serializeContent,
+  yamlCodec,
+} from "./index.js";
 
 describe("content codecs", () => {
   it("serializes JSON deterministically", () => {
@@ -19,5 +25,42 @@ describe("content codecs", () => {
       frontmatter: { title: "Hello" },
       body: "# Body\n",
     });
+  });
+
+  it("rejects alias bombs, protected keys, and excessive nesting", () => {
+    expect(() => yamlCodec.parse("value: &a [x]\nbomb: [*a, *a, *a]\n")).not.toThrow();
+    expect(() => yamlCodec.parse("__proto__: { polluted: true }\n")).toThrow(/protected key/i);
+    expect(() =>
+      yamlCodec.parse(
+        `value: &a [x]\nbomb: [${Array.from({ length: 60 }, () => "*a").join(",")}]\n`,
+      ),
+    ).toThrow();
+
+    let nested: unknown = "leaf";
+    for (let index = 0; index < 70; index += 1) nested = { child: nested };
+    expect(() => canonicalJson(nested)).toThrow(/complexity/i);
+  });
+
+  it("reports source locations and preserves untouched author formatting", () => {
+    const invalid = parseContentWithDiagnostics("content.yaml", "title: Home\nbroken: [\n");
+    expect(invalid).toMatchObject({
+      ok: false,
+      diagnostics: [{ location: { line: 3 } }],
+    });
+    const original = "title: Home\nsections: []\n";
+    expect(
+      serializeContent(
+        "content.yaml",
+        { sections: [], title: "Home" },
+        { mode: "preserve", originalSource: original },
+      ),
+    ).toBe(original);
+    expect(
+      serializeContent(
+        "content.yaml",
+        { sections: [], title: "Changed" },
+        { mode: "preserve", originalSource: original },
+      ),
+    ).not.toBe(original);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSearchIndex, findUsages, search } from "./index.js";
+import { buildReferenceGraph, buildSearchIndex, findUsages, search } from "./index.js";
 
 const documents = [
   {
@@ -27,5 +27,31 @@ describe("search graph", () => {
     expect(findUsages(documents, "global-navigation")).toContainEqual(
       expect.objectContaining({ id: "page-home" }),
     );
+  });
+
+  it("builds a deterministic reference graph and reports broken references", () => {
+    const graph = buildReferenceGraph([
+      ...documents,
+      {
+        id: "page-pricing",
+        type: "pages",
+        title: "Pricing",
+        path: "/pricing",
+        value: {
+          navigation: { global: "global-navigation" },
+          sections: [{ type: "reference", ref: "reusable-blocks/missing" }],
+        },
+      },
+    ]);
+    expect(graph.edges).toContainEqual({
+      sourceId: "page-home",
+      sourcePath: "/navigation/id",
+      targetId: "global-navigation",
+    });
+    expect(graph.broken).toContainEqual({
+      sourceId: "page-pricing",
+      sourcePath: "/sections/0/ref",
+      reference: "reusable-blocks/missing",
+    });
   });
 });

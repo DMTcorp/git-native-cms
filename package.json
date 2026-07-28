@@ -12,14 +12,17 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
-    "lint": "eslint .",
+    "lint": "turbo run build --filter='./packages/*' && eslint .",
     "typecheck": "turbo run typecheck",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:live": "node tooling/scripts/smoke-live.mjs",
+    "test:live:flow": "tsx tooling/scripts/e2e-live.ts",
     "test:watch": "vitest",
     "test:e2e": "turbo run build --filter=@git-native-cms/playground-next --filter=@git-native-cms/playground-astro && playwright test",
     "architecture": "dependency-cruiser packages --config dependency-cruiser.cjs",
     "budgets": "node tooling/scripts/check-bundle-budgets.mjs",
+    "registry:digest": "tsx tooling/scripts/registry-digest.ts",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm architecture && pnpm build && pnpm budgets",
     "changeset": "changeset",
     "version-packages": "changeset version",
@@ -27,7 +30,9 @@
     "cms": "tsx packages/cli/src/bin.ts"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "catalog:",
     "@changesets/cli": "latest",
+    "@axe-core/playwright": "latest",
     "@eslint/js": "latest",
     "@playwright/test": "latest",
     "@types/node": "latest",
