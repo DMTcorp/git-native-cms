@@ -31,7 +31,8 @@
     "@git-native-cms/testing": "workspace:*",
     "astro": "latest",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "sharp": "latest"
   },
   "devDependencies": {
     "@astrojs/check": "latest",

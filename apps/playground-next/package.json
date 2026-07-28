@@ -29,7 +29,8 @@
     "@git-native-cms/testing": "workspace:*",
     "next": "latest",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "sharp": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",
