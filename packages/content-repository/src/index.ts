@@ -11,6 +11,7 @@ import {
   CmsError,
   type ContentDocument,
   type DocumentId,
+  type GitCommitSha,
   type Revision,
 } from "@git-native-cms/core";
 
@@ -94,8 +95,69 @@ function encodeDocument(document: ContentDocument): string {
   });
 }
 
+interface RepositorySnapshot {
+  readonly revision: GitCommitSha;
+  readonly documents: readonly {
+    readonly path: string;
+    readonly document: ContentDocument;
+  }[];
+  readonly byId: ReadonlyMap<DocumentId, ContentDocument>;
+}
+
 export class GitContentRepository implements ContentRepository {
+  private static readonly REVISION_CACHE_LIMIT = 64;
+  private readonly revisions = new Map<GitCommitSha, Promise<RepositorySnapshot>>();
+
   constructor(private readonly git: GitProvider) {}
+
+  private remember(
+    revision: GitCommitSha,
+    snapshot: Promise<RepositorySnapshot>,
+  ): Promise<RepositorySnapshot> {
+    this.revisions.delete(revision);
+    this.revisions.set(revision, snapshot);
+    while (this.revisions.size > GitContentRepository.REVISION_CACHE_LIMIT) {
+      const oldest = this.revisions.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.revisions.delete(oldest);
+    }
+    void snapshot.catch(() => {
+      if (this.revisions.get(revision) === snapshot) this.revisions.delete(revision);
+    });
+    return snapshot;
+  }
+
+  private async snapshot(input: {
+    readonly ref: string;
+    readonly signal?: AbortSignal;
+  }): Promise<RepositorySnapshot> {
+    const resolved = await this.git.resolveRef(input.ref, input.signal);
+    const cached = this.revisions.get(resolved.sha);
+    if (cached !== undefined) return cached;
+    return this.remember(
+      resolved.sha,
+      this.git
+        .listFiles({
+          ref: resolved.sha,
+          prefix: "content/",
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        })
+        .then((files) => {
+          const documents = files
+            .filter((file) => /\/index\.(yaml|yml|json|md)$/.test(file.path))
+            .map((file) => ({
+              path: file.path,
+              document: decodeDocument(file.path, file.content, resolved.sha),
+            }))
+            .sort((left, right) => left.path.localeCompare(right.path));
+          const byId = new Map<DocumentId, ContentDocument>();
+          for (const entry of documents) {
+            if (!byId.has(entry.document.id)) byId.set(entry.document.id, entry.document);
+          }
+          return { revision: resolved.sha, documents, byId };
+        }),
+    );
+  }
 
   async listDocuments(input: {
     readonly ref: string;
@@ -103,30 +165,22 @@ export class GitContentRepository implements ContentRepository {
     readonly cursor?: string;
     readonly signal?: AbortSignal;
   }): Promise<Page<DocumentSummary>> {
-    const prefix = input.type === undefined ? "content/" : `content/${input.type}/`;
-    const [files, ref] = await Promise.all([
-      this.git.listFiles({
-        ref: input.ref,
-        prefix,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      }),
-      this.git.resolveRef(input.ref, input.signal),
-    ]);
-    const decoded = files
-      .filter((file) => /\/index\.(yaml|yml|json|md)$/.test(file.path))
-      .map((file) => ({ file, document: decodeDocument(file.path, file.content, ref.sha) }))
-      .sort((left, right) => left.file.path.localeCompare(right.file.path));
+    const snapshot = await this.snapshot(input);
+    const decoded =
+      input.type === undefined
+        ? snapshot.documents
+        : snapshot.documents.filter(({ document }) => document.type === input.type);
     const offset = Number(input.cursor ?? "0");
     const page = decoded.slice(offset, offset + 100);
     return {
-      items: page.map(({ file, document }) => ({
+      items: page.map(({ path, document }) => ({
         id: document.id,
         type: document.type,
         title:
           isRecord(document.data) && typeof document.data.title === "string"
             ? document.data.title
             : String(document.id),
-        path: file.path,
+        path,
         revision: document.revision,
       })),
       ...(offset + page.length < decoded.length
@@ -140,18 +194,8 @@ export class GitContentRepository implements ContentRepository {
     readonly documentId: DocumentId;
     readonly signal?: AbortSignal;
   }): Promise<ContentDocument> {
-    const [files, ref] = await Promise.all([
-      this.git.listFiles({
-        ref: input.ref,
-        prefix: "content/",
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      }),
-      this.git.resolveRef(input.ref, input.signal),
-    ]);
-    for (const file of files.filter((candidate) => candidate.path.includes("/index."))) {
-      const document = decodeDocument(file.path, file.content, ref.sha);
-      if (document.id === input.documentId) return document;
-    }
+    const document = (await this.snapshot(input)).byId.get(input.documentId);
+    if (document !== undefined) return document;
     throw new CmsError({
       code: "CMS_DOCUMENT_404",
       message: `Document ${input.documentId} was not found.`,

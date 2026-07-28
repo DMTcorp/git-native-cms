@@ -69,6 +69,15 @@ class StrictDeleteMemoryGitProvider extends MemoryGitProvider {
 
 class EventuallyConsistentMemoryGitProvider extends MemoryGitProvider {
   private staleRef: Awaited<ReturnType<MemoryGitProvider["resolveRef"]>> | undefined;
+  private observedListFileCalls = 0;
+
+  get listFileCalls(): number {
+    return this.observedListFileCalls;
+  }
+
+  resetListFileCalls(): void {
+    this.observedListFileCalls = 0;
+  }
 
   override async resolveRef(input: Parameters<MemoryGitProvider["resolveRef"]>[0]) {
     if (this.staleRef?.name === input) {
@@ -77,6 +86,11 @@ class EventuallyConsistentMemoryGitProvider extends MemoryGitProvider {
       return stale;
     }
     return super.resolveRef(input);
+  }
+
+  override async listFiles(input: Parameters<MemoryGitProvider["listFiles"]>[0]) {
+    this.observedListFileCalls += 1;
+    return super.listFiles(input);
   }
 
   override async commitFiles(input: Parameters<GitProvider["commitFiles"]>[0]) {
@@ -388,10 +402,12 @@ describe("application commands", () => {
         { ...context, actor: reviewer },
       ),
     ).rejects.toMatchObject({ code: "CMS_CHANGE_009" });
+    git.resetListFileCalls();
     const conflictState = await application.readChangeConflicts.execute(
       { change: approved.change },
       context,
     );
+    expect(git.listFileCalls).toBeLessThanOrEqual(3);
     expect(conflictState.stagingRevision).toBe(stagingRevision);
     expect(conflictState.conflicts).toEqual([
       expect.objectContaining({
