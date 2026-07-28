@@ -25,6 +25,41 @@ export interface GitHubRequester {
   ): Promise<{ readonly data: unknown }>;
 }
 
+export function withGitHubErrorNormalization(requester: GitHubRequester): GitHubRequester {
+  return {
+    async request(route, parameters) {
+      try {
+        return await requester.request(route, parameters);
+      } catch (cause) {
+        const status = statusCode(cause);
+        const message = cause instanceof Error ? cause.message : String(cause);
+        const remaining = responseHeader(cause, "x-ratelimit-remaining");
+        if (
+          (status === 403 || status === 429) &&
+          (remaining === "0" || /(?:secondary )?rate limit/iu.test(message))
+        ) {
+          const resetSeconds = Number(responseHeader(cause, "x-ratelimit-reset"));
+          const retryAfterSeconds = Number(responseHeader(cause, "retry-after"));
+          throw new CmsError({
+            code: "CMS_GITHUB_429",
+            message: "The GitHub App API limit is exhausted. Retry after GitHub resets it.",
+            category: "git",
+            retryable: true,
+            context: {
+              ...(Number.isFinite(resetSeconds)
+                ? { resetAt: new Date(resetSeconds * 1_000).toISOString() }
+                : {}),
+              ...(Number.isFinite(retryAfterSeconds) ? { retryAfterSeconds } : {}),
+            },
+            cause,
+          });
+        }
+        throw cause;
+      }
+    },
+  };
+}
+
 interface GitHubProviderOptions {
   readonly requester: GitHubRequester;
   readonly owner: string;
@@ -45,9 +80,9 @@ export async function createGitHubAppRequester(input: {
     Octokit: EnterpriseOctokit,
   });
   const octokit = await app.getInstallationOctokit(input.installationId);
-  return {
+  return withGitHubErrorNormalization({
     request: (route, parameters) => octokit.request(route as never, parameters as never),
-  };
+  });
 }
 
 function apiUrl(baseUrl: string, path: string): string {
@@ -211,9 +246,7 @@ export class GitHubTeamProvisioning implements TeamProvisioningPort {
                 id: String(team.id),
                 slug: team.slug,
                 name: team.name,
-                ...(typeof team.description === "string"
-                  ? { description: team.description }
-                  : {}),
+                ...(typeof team.description === "string" ? { description: team.description } : {}),
               },
             ]
           : [];
@@ -221,9 +254,7 @@ export class GitHubTeamProvisioning implements TeamProvisioningPort {
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  async invite(
-    input: Parameters<TeamProvisioningPort["invite"]>[0],
-  ): Promise<TeamInvitation> {
+  async invite(input: Parameters<TeamProvisioningPort["invite"]>[0]): Promise<TeamInvitation> {
     if ((input.email === undefined) === (input.inviteeId === undefined)) {
       throw new CmsError({
         code: "CMS_TEAM_001",
@@ -306,6 +337,18 @@ function statusCode(error: unknown): number | undefined {
     typeof error.status === "number"
     ? error.status
     : undefined;
+}
+
+function responseHeader(error: unknown, name: string): string | undefined {
+  if (typeof error !== "object" || error === null || !("response" in error)) return undefined;
+  const response = error.response;
+  if (typeof response !== "object" || response === null || !("headers" in response)) {
+    return undefined;
+  }
+  const headers = response.headers;
+  if (typeof headers !== "object" || headers === null) return undefined;
+  const value = (headers as Readonly<Record<string, unknown>>)[name];
+  return typeof value === "string" ? value : typeof value === "number" ? String(value) : undefined;
 }
 
 async function waitFor(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -527,21 +570,18 @@ export class GitHubGitProvider implements GitProvider {
   ): Promise<PullRequest> {
     const cached = this.revertRequests.get(input.idempotencyKey);
     if (cached !== undefined) return cached;
-    const lookup = await this.requester.request(
-      "POST /graphql",
-      {
-        query: `query CmsPullRequestId($owner: String!, $repository: String!, $number: Int!) {
+    const lookup = await this.requester.request("POST /graphql", {
+      query: `query CmsPullRequestId($owner: String!, $repository: String!, $number: Int!) {
           repository(owner: $owner, name: $repository) {
             pullRequest(number: $number) { id }
           }
         }`,
-        variables: {
-          owner: this.owner,
-          repository: this.repository,
-          number: input.pullRequestNumber,
-        },
+      variables: {
+        owner: this.owner,
+        repository: this.repository,
+        number: input.pullRequestNumber,
       },
-    );
+    });
     const lookupEnvelope = record(lookup.data);
     const lookupData = record(lookupEnvelope.data ?? lookupEnvelope);
     const pullRequestId = record(record(lookupData.repository).pullRequest).id;
@@ -606,11 +646,7 @@ export class GitHubGitProvider implements GitProvider {
       head: pullRequest.headRefName,
       base: pullRequest.baseRefName,
       state:
-        pullRequest.merged === true
-          ? "merged"
-          : pullRequest.state === "OPEN"
-            ? "open"
-            : "closed",
+        pullRequest.merged === true ? "merged" : pullRequest.state === "OPEN" ? "open" : "closed",
     };
     this.revertRequests.set(input.idempotencyKey, result);
     return result;
@@ -720,9 +756,7 @@ export class GitHubReviewPort implements ReviewPort {
     return Array.isArray(response.data) ? response.data.map((value) => this.comment(value)) : [];
   }
 
-  async resolveComment(
-    input: Parameters<ReviewPort["resolveComment"]>[0],
-  ): Promise<ReviewComment> {
+  async resolveComment(input: Parameters<ReviewPort["resolveComment"]>[0]): Promise<ReviewComment> {
     const existing = await this.requester.request(
       "GET /repos/{owner}/{repo}/issues/comments/{comment_id}",
       this.parameters({ comment_id: Number(input.commentId) || input.commentId }),

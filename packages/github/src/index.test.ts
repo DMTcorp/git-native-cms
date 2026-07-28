@@ -10,12 +10,39 @@ import {
   GitHubIdentityProvider,
   GitHubReviewPort,
   GitHubTeamProvisioning,
+  withGitHubErrorNormalization,
   type GitHubRequester,
 } from "./index.js";
 
 interface FixtureCommit {
   readonly tree: string;
 }
+
+describe("GitHub request errors", () => {
+  it("exposes installation rate limits as retryable Git errors", async () => {
+    const reset = 1_788_290_400;
+    const requester = withGitHubErrorNormalization({
+      async request() {
+        throw Object.assign(new Error("API rate limit exceeded for installation ID 149379007."), {
+          status: 403,
+          response: {
+            headers: {
+              "x-ratelimit-remaining": "0",
+              "x-ratelimit-reset": String(reset),
+            },
+          },
+        });
+      },
+    });
+
+    await expect(requester.request("GET /rate_limit", {})).rejects.toMatchObject({
+      code: "CMS_GITHUB_429",
+      category: "git",
+      retryable: true,
+      context: { resetAt: new Date(reset * 1_000).toISOString() },
+    });
+  });
+});
 
 class GitHubFixtureRequester implements GitHubRequester {
   private sequence = 1;
@@ -190,9 +217,7 @@ class GitHubFixtureRequester implements GitHubRequester {
       }
       if (query.includes("mutation CmsRevertPullRequest")) {
         const originalNumber = Number(String(variables.pullRequestId).replace("PR_", ""));
-        const original = this.pullRequests.find(
-          (candidate) => candidate.number === originalNumber,
-        );
+        const original = this.pullRequests.find((candidate) => candidate.number === originalNumber);
         const before = this.mergedBefore.get(originalNumber);
         if (original === undefined || before === undefined) throw { status: 422 };
         const base = (original.base as { ref: string }).ref;
@@ -356,9 +381,7 @@ describe("GitHub review adapter contract", () => {
         }
         if (route === "GET /repos/{owner}/{repo}/issues/comments/{comment_id}") {
           return {
-            data: comments.find(
-              (comment) => String(comment.id) === String(parameters.comment_id),
-            ),
+            data: comments.find((comment) => String(comment.id) === String(parameters.comment_id)),
           };
         }
         if (route === "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}") {
@@ -469,8 +492,10 @@ describe("GitHub user identity adapter", () => {
 
 describe("GitHub organization provisioning adapter", () => {
   it("lists members and teams, sends invitations, and assigns team membership", async () => {
-    const calls: { readonly route: string; readonly parameters: Readonly<Record<string, unknown>> }[] =
-      [];
+    const calls: {
+      readonly route: string;
+      readonly parameters: Readonly<Record<string, unknown>>;
+    }[] = [];
     const requester: GitHubRequester = {
       async request(route, parameters) {
         calls.push({ route, parameters });
