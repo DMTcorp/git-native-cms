@@ -80,12 +80,8 @@ function smokeTest(accessKeyId, secretAccessKey) {
 }
 
 async function verifyBucketObjectAccess(accessKeyId, secretAccessKey) {
-  const {
-    DeleteObjectCommand,
-    GetObjectCommand,
-    PutObjectCommand,
-    S3Client,
-  } = await import("@aws-sdk/client-s3");
+  const { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } =
+    await import("@aws-sdk/client-s3");
   const client = new S3Client({
     endpoint,
     region: "auto",
@@ -165,6 +161,8 @@ const server = createServer(async (request, response) => {
             <p>The token should have Object Read &amp; Write access limited to
               <code>${html(assetsBucket)}</code>, <code>${html(releasesBucket)}</code> and
               private <code>${html(stateBucket)}</code>.</p>
+            <p>Bucket CORS is configured separately in the Cloudflare dashboard because this
+              least-privilege token intentionally cannot edit bucket settings.</p>
             <form method="post" action="/configure" autocomplete="off">
               <input type="hidden" name="state" value="${html(state)}">
               <label>Access Key ID
@@ -220,7 +218,7 @@ const server = createServer(async (request, response) => {
         <title>R2 configured</title><body>
         <h1>R2 is connected.</h1>
         <p>The adapter smoke test passed and both Vercel Production projects were updated.
-        You can close this tab.</p></body></html>`);
+        Browser CORS remains a separate bucket setting. You can close this tab.</p></body></html>`);
       console.log("READY R2 credentials verified and stored in both Vercel projects.");
       server.close();
       return;

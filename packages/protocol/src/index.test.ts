@@ -48,6 +48,12 @@ describe("protocol", () => {
         payload: { sectionId: "" },
       }),
     ).toBe(false);
+    expect(
+      isPreviewEditorMessage({
+        ...selected,
+        timestamp: "2026-99-99T12:00:00.000Z",
+      }),
+    ).toBe(false);
 
     const timestamp = { now: new Date("2026-07-27T12:00:00Z") };
     for (const message of [
@@ -94,9 +100,9 @@ describe("protocol", () => {
     expect(
       httpOperationForRequest("POST", "/api/cms/changes/chg_1/documents/doc_1"),
     ).toBeUndefined();
-    expect(
-      httpOperationForRequest("PATCH", "/api/cms/changes/chg_1/documents/doc_1"),
-    ).toBe("document.update");
+    expect(httpOperationForRequest("PATCH", "/api/cms/changes/chg_1/documents/doc_1")).toBe(
+      "document.update",
+    );
     expect(
       isHttpPayload("change.create", {
         name: "Homepage launch",

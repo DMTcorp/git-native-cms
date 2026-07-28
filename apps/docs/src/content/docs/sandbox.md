@@ -20,8 +20,11 @@ only assets and releases receive public development URLs. Use the S3 endpoint
 `CMS_PUBLIC_ASSETS_URL` and `CMS_PUBLIC_RELEASES_URL`.
 
 The assets bucket CORS policy allows `PUT` and `HEAD` only from the two stable Vercel origins,
-including `content-type` and signed `x-amz-*` headers. `tooling/scripts/configure-r2.mjs` applies
-that policy after its credential smoke test.
+including `content-type` and signed `x-amz-*` headers. Configure this policy in the Cloudflare
+dashboard. The least-privilege Object Read & Write token used by
+`tooling/scripts/configure-r2.mjs` verifies object access and updates Vercel, but intentionally
+cannot edit bucket settings. The live acceptance flow verifies the real browser preflight before
+every direct upload.
 
 Set immutable release and asset objects to long-lived cache. Configure
 `environments/*/current.json` for revalidation/no-cache. The adapter uses conditional writes for

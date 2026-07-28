@@ -1,6 +1,7 @@
 import AjvModule, { type ValidateFunction } from "ajv";
+import { PROTOCOL_VERSION } from "./constants.js";
 
-export const PROTOCOL_VERSION = "1.0.0";
+export { PROTOCOL_VERSION } from "./constants.js";
 
 export interface ProtocolEnvelope<TType extends string, TPayload> {
   readonly protocolVersion: string;

@@ -36,6 +36,26 @@ test("public page stays separate from the editor runtime", async ({ page }) => {
   await expect(page.locator('script[src*="editor"]')).toHaveCount(0);
 });
 
+test("editor boots when runtime string-to-code generation is disabled", async ({ page }) => {
+  await page.addInitScript(() => {
+    const blocked = (): never => {
+      throw new EvalError("Runtime string-to-code generation is disabled by the production CSP.");
+    };
+    const NativeFunction = globalThis.Function;
+    const cspFunction = new Proxy(NativeFunction, {
+      apply: blocked,
+      construct: blocked,
+    });
+    Object.defineProperty(globalThis, "eval", { configurable: false, value: blocked });
+    Object.defineProperty(globalThis, "Function", {
+      configurable: false,
+      value: cspFunction,
+    });
+  });
+  await page.goto("/cms");
+  await expect(page.locator("[data-cms-hydrated='true']")).toBeVisible();
+});
+
 test("pl-PL delivery applies localized pointers and emits hreflang", async ({ page }) => {
   await page.goto("/pl-PL");
   await expect(

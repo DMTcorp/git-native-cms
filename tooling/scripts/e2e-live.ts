@@ -165,6 +165,43 @@ const upload = await api<{
   },
   uploadKey,
 );
+const requestedUploadHeaders = Object.keys(upload.headers)
+  .map((header) => header.toLowerCase())
+  .sort()
+  .join(",");
+const preflight = await fetch(upload.url, {
+  method: "OPTIONS",
+  headers: {
+    origin,
+    "access-control-request-method": "PUT",
+    "access-control-request-headers": requestedUploadHeaders,
+  },
+  signal: AbortSignal.timeout(15_000),
+});
+const allowedOrigin = preflight.headers.get("access-control-allow-origin");
+const allowedMethods =
+  preflight.headers
+    .get("access-control-allow-methods")
+    ?.split(",")
+    .map((method) => method.trim().toUpperCase()) ?? [];
+const allowedHeaders =
+  preflight.headers
+    .get("access-control-allow-headers")
+    ?.split(",")
+    .map((header) => header.trim().toLowerCase()) ?? [];
+const missingAllowedHeaders = requestedUploadHeaders
+  .split(",")
+  .filter((header) => !allowedHeaders.includes(header) && !allowedHeaders.includes("*"));
+if (
+  !preflight.ok ||
+  (allowedOrigin !== origin && allowedOrigin !== "*") ||
+  !allowedMethods.includes("PUT") ||
+  missingAllowedHeaders.length > 0
+) {
+  throw new Error(
+    `R2 browser upload preflight failed (${preflight.status}): origin=${allowedOrigin ?? "missing"}, methods=${allowedMethods.join("|") || "missing"}, missingHeaders=${missingAllowedHeaders.join("|") || "none"}.`,
+  );
+}
 const uploaded = await fetch(upload.url, {
   method: "PUT",
   headers: upload.headers,
