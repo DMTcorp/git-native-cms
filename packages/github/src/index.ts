@@ -370,10 +370,12 @@ async function waitFor(milliseconds: number, signal?: AbortSignal): Promise<void
 }
 
 export class GitHubGitProvider implements GitProvider {
+  private static readonly BLOB_CACHE_LIMIT = 2_048;
   private readonly requester: GitHubRequester;
   private readonly owner: string;
   private readonly repository: string;
   private readonly revertRequests = new Map<string, PullRequest>();
+  private readonly blobCache = new Map<string, string>();
 
   constructor(options: GitHubProviderOptions) {
     this.requester = options.requester;
@@ -383,6 +385,16 @@ export class GitHubGitProvider implements GitProvider {
 
   private parameters(extra: Readonly<Record<string, unknown>> = {}): Record<string, unknown> {
     return { owner: this.owner, repo: this.repository, ...extra };
+  }
+
+  private rememberBlob(sha: string, content: string): void {
+    this.blobCache.delete(sha);
+    this.blobCache.set(sha, content);
+    while (this.blobCache.size > GitHubGitProvider.BLOB_CACHE_LIMIT) {
+      const oldest = this.blobCache.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.blobCache.delete(oldest);
+    }
   }
 
   async resolveRef(ref: string): Promise<GitRef> {
@@ -469,6 +481,7 @@ export class GitHubGitProvider implements GitProvider {
   async listFiles(input: {
     readonly ref: string;
     readonly prefix: string;
+    readonly signal?: AbortSignal;
   }): Promise<readonly GitFile[]> {
     const ref = await this.resolveRef(input.ref);
     const treeResponse = await this.requester.request(
@@ -477,17 +490,40 @@ export class GitHubGitProvider implements GitProvider {
     );
     const tree = record(treeResponse.data).tree;
     if (!Array.isArray(tree)) return [];
-    const paths = tree
+    const entries = tree
       .map(record)
       .filter(
         (entry) =>
           entry.type === "blob" &&
           typeof entry.path === "string" &&
+          typeof entry.sha === "string" &&
           entry.path.startsWith(input.prefix),
       )
-      .map((entry) => entry.path as string);
-    const files = await Promise.all(paths.map((path) => this.readFile({ ref: input.ref, path })));
-    return files.filter((file): file is GitFile => file !== undefined);
+      .map((entry) => ({ path: entry.path as string, sha: entry.sha as GitCommitSha }));
+    return Promise.all(
+      entries.map(async (entry) => {
+        let content = this.blobCache.get(entry.sha);
+        if (content === undefined) {
+          const response = await this.requester.request(
+            "GET /repos/{owner}/{repo}/git/blobs/{file_sha}",
+            this.parameters({
+              file_sha: entry.sha,
+              ...(input.signal === undefined ? {} : { request: { signal: input.signal } }),
+            }),
+          );
+          const data = record(response.data);
+          if (typeof data.content !== "string") {
+            throw new Error("GitHub blob response did not contain content.");
+          }
+          content =
+            data.encoding === "base64" || data.encoding === undefined
+              ? decodeBase64(data.content)
+              : data.content;
+          this.rememberBlob(entry.sha, content);
+        }
+        return { path: entry.path, content, sha: entry.sha };
+      }),
+    );
   }
 
   async commitFiles(input: Parameters<GitProvider["commitFiles"]>[0]): Promise<GitRef> {
@@ -526,7 +562,12 @@ export class GitHubGitProvider implements GitProvider {
           "POST /repos/{owner}/{repo}/git/blobs",
           this.parameters({ content: file.content, encoding: file.encoding ?? "utf-8" }),
         );
-        return { path: file.path, mode: "100644", type: "blob", sha: shaFrom(blob.data) };
+        const blobSha = shaFrom(blob.data);
+        this.rememberBlob(
+          blobSha,
+          file.encoding === "base64" ? decodeBase64(file.content) : file.content,
+        );
+        return { path: file.path, mode: "100644", type: "blob", sha: blobSha };
       }),
     );
     const tree = await this.requester.request(

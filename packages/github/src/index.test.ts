@@ -57,11 +57,16 @@ class GitHubFixtureRequester implements GitHubRequester {
     string,
     { readonly sha: string; readonly remaining: number }
   >();
+  private blobReads = 0;
 
   constructor(
     private readonly visibilityLagReads = 0,
     private readonly staleAfterPatchReads = 0,
   ) {}
+
+  get blobReadCount(): number {
+    return this.blobReads;
+  }
 
   private next(prefix: string): string {
     this.sequence += 1;
@@ -119,8 +124,25 @@ class GitHubFixtureRequester implements GitHubRequester {
     }
     if (route === "POST /repos/{owner}/{repo}/git/blobs") {
       const sha = this.next("blob");
-      this.blobs.set(sha, String(parameters.content));
+      const encoded = parameters.encoding === "base64";
+      this.blobs.set(
+        sha,
+        encoded
+          ? new TextDecoder().decode(
+              Uint8Array.from(atob(String(parameters.content)), (character) =>
+                character.charCodeAt(0),
+              ),
+            )
+          : String(parameters.content),
+      );
       return { data: { sha } };
+    }
+    if (route === "GET /repos/{owner}/{repo}/git/blobs/{file_sha}") {
+      this.blobReads += 1;
+      const sha = String(parameters.file_sha);
+      const content = this.blobs.get(sha);
+      if (content === undefined) throw { status: 404 };
+      return { data: { sha, encoding: "base64", content: btoa(content) } };
     }
     if (route === "POST /repos/{owner}/{repo}/git/trees") {
       const base = this.trees.get(String(parameters.base_tree)) ?? new Map<string, string>();
@@ -389,6 +411,51 @@ describe("GitHub Git Data adapter contract", () => {
     ).resolves.toMatchObject({
       name: created.name,
     });
+  });
+
+  it("reuses immutable Git blobs across repeated tree reads", async () => {
+    const actor: Actor = {
+      id: "act_github_blob_cache" as Actor["id"],
+      githubId: 45,
+      login: "blob-cache",
+      displayName: "Blob Cache Fixture",
+      roles: ["administrator"],
+      source: "cli",
+    };
+    const requester = new GitHubFixtureRequester();
+    const writer = new GitHubGitProvider({
+      requester,
+      owner: "DMTcorp",
+      repository: "fixture",
+    });
+    const created = await writer.createBranch({
+      branch: "change/blob-cache",
+      from: "a".repeat(40) as GitCommitSha,
+    });
+    await writer.commitFiles({
+      branch: created.name,
+      expectedSha: created.sha,
+      files: [{ path: "content/pages/home.yaml", content: "title: Home\n" }],
+      message: "Add cached content",
+      author: actor,
+      idempotencyKey: "blob-cache:write",
+    });
+    const reader = new GitHubGitProvider({
+      requester,
+      owner: "DMTcorp",
+      repository: "fixture",
+    });
+
+    await expect(reader.listFiles({ ref: created.name, prefix: "content/" })).resolves.toEqual([
+      expect.objectContaining({
+        path: "content/pages/home.yaml",
+        content: "title: Home\n",
+      }),
+    ]);
+    expect(requester.blobReadCount).toBe(1);
+
+    await reader.listFiles({ ref: created.name, prefix: "content/" });
+    expect(requester.blobReadCount).toBe(1);
   });
 
   it("passes the shared GitProvider contract against recorded response shapes", async () => {
