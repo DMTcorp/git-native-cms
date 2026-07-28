@@ -496,14 +496,16 @@ export class GitHubGitProvider implements GitProvider {
     for (const [index, delay] of retryDelays.entries()) {
       if (delay > 0) await waitFor(delay, input.signal);
       try {
-        current = await this.resolveRef(input.branch);
-        break;
+        const observed = await this.resolveRef(input.branch);
+        if (observed.sha === input.expectedSha) {
+          current = observed;
+          break;
+        }
       } catch (error) {
         if (statusCode(error) !== 404 || index === retryDelays.length - 1) throw error;
       }
     }
-    if (current === undefined) throw new Error("Git ref resolution exhausted without a result.");
-    if (current.sha !== input.expectedSha) {
+    if (current === undefined) {
       throw new CmsError({
         code: "CMS_GIT_012",
         message: "The Change moved while saving.",

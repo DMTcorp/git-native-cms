@@ -53,8 +53,15 @@ class GitHubFixtureRequester implements GitHubRequester {
   private readonly pullRequests: Record<string, unknown>[] = [];
   private readonly mergedBefore = new Map<number, string>();
   private readonly hiddenRefReads = new Map<string, number>();
+  private readonly staleRefReads = new Map<
+    string,
+    { readonly sha: string; readonly remaining: number }
+  >();
 
-  constructor(private readonly visibilityLagReads = 0) {}
+  constructor(
+    private readonly visibilityLagReads = 0,
+    private readonly staleAfterPatchReads = 0,
+  ) {}
 
   private next(prefix: string): string {
     this.sequence += 1;
@@ -76,6 +83,11 @@ class GitHubFixtureRequester implements GitHubRequester {
       if (hiddenReads > 0) {
         this.hiddenRefReads.set(name, hiddenReads - 1);
         throw { status: 404 };
+      }
+      const stale = this.staleRefReads.get(name);
+      if (stale !== undefined && stale.remaining > 0) {
+        this.staleRefReads.set(name, { ...stale, remaining: stale.remaining - 1 });
+        return { data: { ref: `refs/heads/${name}`, object: { sha: stale.sha } } };
       }
       const sha = this.refs.get(name);
       if (sha === undefined) throw { status: 404 };
@@ -131,7 +143,15 @@ class GitHubFixtureRequester implements GitHubRequester {
       return { data: { sha } };
     }
     if (route === "PATCH /repos/{owner}/{repo}/git/refs/{ref}") {
-      this.refs.set(this.branch(parameters), String(parameters.sha));
+      const name = this.branch(parameters);
+      const previous = this.refs.get(name);
+      this.refs.set(name, String(parameters.sha));
+      if (previous !== undefined && this.staleAfterPatchReads > 0) {
+        this.staleRefReads.set(name, {
+          sha: previous,
+          remaining: this.staleAfterPatchReads,
+        });
+      }
       return { data: { object: { sha: parameters.sha } } };
     }
     if (route === "GET /repos/{owner}/{repo}/contents/{path}") {
@@ -327,6 +347,47 @@ describe("GitHub Git Data adapter contract", () => {
       }),
     ).resolves.toMatchObject({
       name: "rollback/eventually-readable",
+    });
+  });
+
+  it("retries the exact-SHA check while an updated ref still reads as its parent", async () => {
+    const actor: Actor = {
+      id: "act_github_stale_ref" as Actor["id"],
+      githubId: 44,
+      login: "stale-ref",
+      displayName: "Stale Ref Fixture",
+      roles: ["administrator"],
+      source: "cli",
+    };
+    const provider = new GitHubGitProvider({
+      requester: new GitHubFixtureRequester(0, 2),
+      owner: "DMTcorp",
+      repository: "fixture",
+    });
+    const created = await provider.createBranch({
+      branch: "change/eventually-updated",
+      from: "a".repeat(40) as GitCommitSha,
+    });
+    const first = await provider.commitFiles({
+      branch: created.name,
+      expectedSha: created.sha,
+      files: [{ path: "content/first.yaml", content: "title: First\n" }],
+      message: "First write",
+      author: actor,
+      idempotencyKey: "stale-ref:first",
+    });
+
+    await expect(
+      provider.commitFiles({
+        branch: created.name,
+        expectedSha: first.sha,
+        files: [{ path: ".cms/change.yaml", content: "status: draft\n" }],
+        message: "Follow-up metadata",
+        author: actor,
+        idempotencyKey: "stale-ref:metadata",
+      }),
+    ).resolves.toMatchObject({
+      name: created.name,
     });
   });
 
