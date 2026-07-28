@@ -14,6 +14,9 @@ class GitHubFixtureRequester implements GitHubRequester {
   private readonly trees = new Map<string, Map<string, string>>([["tree-1", new Map()]]);
   private readonly blobs = new Map<string, string>();
   private readonly pullRequests: Record<string, unknown>[] = [];
+  private readonly hiddenRefReads = new Map<string, number>();
+
+  constructor(private readonly visibilityLagReads = 0) {}
 
   private next(prefix: string): string {
     this.sequence += 1;
@@ -31,6 +34,11 @@ class GitHubFixtureRequester implements GitHubRequester {
   ): Promise<{ readonly data: unknown }> {
     if (route === "GET /repos/{owner}/{repo}/git/ref/{ref}") {
       const name = this.branch(parameters);
+      const hiddenReads = this.hiddenRefReads.get(name) ?? 0;
+      if (hiddenReads > 0) {
+        this.hiddenRefReads.set(name, hiddenReads - 1);
+        throw { status: 404 };
+      }
       const sha = this.refs.get(name);
       if (sha === undefined) throw { status: 404 };
       return { data: { ref: `refs/heads/${name}`, object: { sha } } };
@@ -46,6 +54,7 @@ class GitHubFixtureRequester implements GitHubRequester {
     if (route === "POST /repos/{owner}/{repo}/git/refs") {
       const name = this.branch(parameters);
       this.refs.set(name, String(parameters.sha));
+      this.hiddenRefReads.set(name, this.visibilityLagReads);
       return { data: { ref: `refs/heads/${name}`, object: { sha: parameters.sha } } };
     }
     if (route === "DELETE /repos/{owner}/{repo}/git/refs/{ref}") {
@@ -178,6 +187,39 @@ describe("GitHub Git Data adapter contract", () => {
       "GET /repos/{owner}/{repo}/git/ref/{ref}",
       "POST /repos/{owner}/{repo}/git/refs",
     ]);
+  });
+
+  it("retries the exact-SHA check while a fresh branch is propagating", async () => {
+    const actor: Actor = {
+      id: "act_github_retry" as Actor["id"],
+      githubId: 43,
+      login: "retry",
+      displayName: "Retry Fixture",
+      roles: ["administrator"],
+      source: "cli",
+    };
+    const provider = new GitHubGitProvider({
+      requester: new GitHubFixtureRequester(2),
+      owner: "DMTcorp",
+      repository: "fixture",
+    });
+    const created = await provider.createBranch({
+      branch: "rollback/eventually-readable",
+      from: "a".repeat(40) as GitCommitSha,
+    });
+
+    await expect(
+      provider.commitFiles({
+        branch: created.name,
+        expectedSha: created.sha,
+        files: [{ path: ".cms/rollback.yaml", content: "releaseId: rel_fixture\n" }],
+        message: "Record rollback",
+        author: actor,
+        idempotencyKey: "rollback:fixture",
+      }),
+    ).resolves.toMatchObject({
+      name: "rollback/eventually-readable",
+    });
   });
 
   it("passes the shared GitProvider contract against recorded response shapes", async () => {

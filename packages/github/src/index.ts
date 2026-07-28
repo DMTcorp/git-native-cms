@@ -57,6 +57,33 @@ function decodeBase64(value: string): string {
   );
 }
 
+function statusCode(error: unknown): number | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    typeof error.status === "number"
+    ? error.status
+    : undefined;
+}
+
+async function waitFor(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(signal.reason);
+      return;
+    }
+    const timeout = setTimeout(resolve, milliseconds);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
 export class GitHubGitProvider implements GitProvider {
   private readonly requester: GitHubRequester;
   private readonly owner: string;
@@ -178,7 +205,18 @@ export class GitHubGitProvider implements GitProvider {
   }
 
   async commitFiles(input: Parameters<GitProvider["commitFiles"]>[0]): Promise<GitRef> {
-    const current = await this.resolveRef(input.branch);
+    let current: GitRef | undefined;
+    const retryDelays = [0, 100, 250, 500, 1_000, 2_000] as const;
+    for (const [index, delay] of retryDelays.entries()) {
+      if (delay > 0) await waitFor(delay, input.signal);
+      try {
+        current = await this.resolveRef(input.branch);
+        break;
+      } catch (error) {
+        if (statusCode(error) !== 404 || index === retryDelays.length - 1) throw error;
+      }
+    }
+    if (current === undefined) throw new Error("Git ref resolution exhausted without a result.");
     if (current.sha !== input.expectedSha) {
       throw new CmsError({
         code: "CMS_GIT_012",
