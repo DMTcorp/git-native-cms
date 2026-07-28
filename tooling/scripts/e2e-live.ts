@@ -1,4 +1,5 @@
-import { randomBytes } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Actor, ActorId, ContentDocument } from "../../packages/core/src/index.js";
 import { RotatingCookieSessionService } from "../../packages/sessions/src/index.js";
@@ -139,6 +140,85 @@ const initialHome = await api<{ readonly document: ContentDocument }>(
   `changes/${change.id}/documents/doc_home`,
 );
 
+const assetBytes = Uint8Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  ),
+);
+const assetChecksum = createHash("sha256").update(assetBytes).digest("hex");
+const uploadKey = `live:${runId}:asset-upload`;
+const upload = await api<{
+  readonly uploadId: string;
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+}>(
+  editorSession,
+  "POST",
+  "assets/uploads",
+  {
+    fileName: `live-acceptance-${runId}.png`,
+    mimeType: "image/png",
+    size: assetBytes.byteLength,
+    checksum: assetChecksum,
+    idempotencyKey: uploadKey,
+  },
+  uploadKey,
+);
+const uploaded = await fetch(upload.url, {
+  method: "PUT",
+  headers: upload.headers,
+  body: Buffer.from(assetBytes),
+  signal: AbortSignal.timeout(30_000),
+});
+if (!uploaded.ok) throw new Error(`Direct R2 asset upload returned ${uploaded.status}.`);
+
+const finalizeKey = `live:${runId}:asset-finalize`;
+const finalized = await api<{
+  readonly asset: {
+    readonly id: string;
+    readonly url: string;
+    readonly mimeType: string;
+    readonly fileName: string;
+    readonly altText?: string;
+  };
+  readonly revision: string;
+}>(
+  editorSession,
+  "POST",
+  `assets/uploads/${encodeURIComponent(upload.uploadId)}/finalize`,
+  {
+    changeId: change.id,
+    checksum: assetChecksum,
+    expectedRevision: initialHome.document.revision,
+    idempotencyKey: finalizeKey,
+  },
+  finalizeKey,
+);
+const assetMetadataKey = `live:${runId}:asset-metadata`;
+const storedAsset = await api<{
+  readonly asset: {
+    readonly id: string;
+    readonly url: string;
+    readonly mimeType: string;
+    readonly fileName: string;
+    readonly altText?: string;
+  };
+  readonly revision: string;
+}>(
+  editorSession,
+  "PATCH",
+  `assets/${encodeURIComponent(finalized.asset.id)}`,
+  {
+    changeId: change.id,
+    altText: "A live R2 asset selected through the CMS media field",
+    focalPoint: { x: 0.5, y: 0.5 },
+    expectedRevision: finalized.revision,
+    idempotencyKey: assetMetadataKey,
+  },
+  assetMetadataKey,
+);
+
 async function createDocument(
   type: string,
   data: Readonly<Record<string, unknown>>,
@@ -173,6 +253,7 @@ const page = await createDocument(
         type: "hero",
         heading: "Git-native content, proven live",
         description: "Created through the same application command used by the editor.",
+        media: storedAsset.asset,
       },
     ],
     locales: {
@@ -182,7 +263,7 @@ const page = await createDocument(
       },
     },
   },
-  initialHome.document.revision,
+  storedAsset.revision,
   "page",
 );
 const pricing = await createDocument(
@@ -226,6 +307,17 @@ const updated = await api<{ readonly document: ContentDocument }>(
           source: "editor",
         },
       },
+      {
+        op: "set",
+        path: "/sections/0/media",
+        value: storedAsset.asset,
+        metadata: {
+          id: `patch-media-${runId}`,
+          actorId: editor.id,
+          createdAt: new Date().toISOString(),
+          source: "editor",
+        },
+      },
     ],
     idempotencyKey: updateKey,
   },
@@ -237,8 +329,15 @@ const preview = await fetch(`${origin}/cms/changes/${encodeURIComponent(change.i
   headers: { cookie: `cms_session=${editorSession.token}` },
   signal: AbortSignal.timeout(30_000),
 });
-if (!preview.ok || !(await preview.text()).includes(`Live acceptance ${runId}`)) {
-  throw new Error("The server-rendered Change preview did not contain the edited home title.");
+const previewSource = await preview.text();
+if (
+  !preview.ok ||
+  !previewSource.includes(`Live acceptance ${runId}`) ||
+  !previewSource.includes("A live R2 asset selected through the CMS media field")
+) {
+  throw new Error(
+    "The server-rendered Change preview did not contain the edited title and selected R2 asset.",
+  );
 }
 
 const submitKey = `live:${runId}:submit`;
@@ -385,6 +484,26 @@ if (
 ) {
   throw new Error("The immutable CDN manifest does not match the published release.");
 }
+const indexResponse = await fetch(
+  `${releasesOrigin}/releases/${published.releaseId}/content-index.json`,
+  { signal: AbortSignal.timeout(15_000) },
+);
+const contentIndex = (await indexResponse.json()) as readonly {
+  readonly title?: string;
+  readonly path?: string;
+}[];
+const releasedPage = contentIndex.find((entry) => entry.title === `Acceptance page ${runId}`);
+if (!indexResponse.ok || releasedPage?.path === undefined) {
+  throw new Error("The immutable CDN index does not contain the live acceptance page.");
+}
+const releasedPageResponse = await fetch(
+  `${releasesOrigin}/releases/${published.releaseId}/${releasedPage.path}`,
+  { signal: AbortSignal.timeout(15_000) },
+);
+const releasedPageSource = await releasedPageResponse.text();
+if (!releasedPageResponse.ok || !releasedPageSource.includes(storedAsset.asset.id)) {
+  throw new Error("The immutable CDN page does not contain the stable R2 asset reference.");
+}
 
 async function confirmation(action: "rollback"): Promise<string> {
   return (
@@ -430,6 +549,7 @@ process.stdout.write(
   [
     `READY Change ${change.id}`,
     `READY review PR ${submitted.pullRequest.url}`,
+    `READY asset ${storedAsset.asset.id}`,
     `READY release ${published.releaseId}`,
     `READY rollback ${baseline.releaseId} and restore ${restored.releaseId}`,
   ].join("\n") + "\n",
