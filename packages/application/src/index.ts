@@ -3263,10 +3263,6 @@ export class ResolveChangeConflictsHandler {
         });
       }
 
-      const current = await this.dependencies.git.resolveRef(
-        input.change.branchName,
-        context.signal,
-      );
       const change: Change = {
         ...input.change,
         baseBranch: stagingBranch(this.dependencies),
@@ -3276,7 +3272,10 @@ export class ResolveChangeConflictsHandler {
       };
       const committed = await this.dependencies.git.commitFiles({
         branch: input.change.branchName,
-        expectedSha: current.sha,
+        // Continue from the exact CAS result of the document writes. Re-reading
+        // the ref here can be stale on GitHub immediately after an update and
+        // must not broaden the transaction to an unrelated concurrent commit.
+        expectedSha: contentRevision,
         files: [{ path: ".cms/change.yaml", content: yamlCodec.serialize(change) }],
         message: changeCommitMessage(change, "Resolve semantic conflicts with Staging"),
         author: context.actor,

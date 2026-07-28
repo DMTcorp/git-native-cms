@@ -7,6 +7,7 @@ import {
   type Asset,
   type AssetStore,
   type EnvironmentPointer,
+  type GitProvider,
   type PreviewSessionPort,
   type ReleaseBuilderPort,
   type ReleaseStore,
@@ -53,7 +54,7 @@ function fixture() {
 }
 
 class StrictDeleteMemoryGitProvider extends MemoryGitProvider {
-  override async commitFiles(input: Parameters<MemoryGitProvider["commitFiles"]>[0]) {
+  override async commitFiles(input: Parameters<GitProvider["commitFiles"]>[0]) {
     for (const file of input.files) {
       if (
         file.content === null &&
@@ -63,6 +64,29 @@ class StrictDeleteMemoryGitProvider extends MemoryGitProvider {
       }
     }
     return super.commitFiles(input);
+  }
+}
+
+class EventuallyConsistentMemoryGitProvider extends MemoryGitProvider {
+  private rejectNextRefRead = false;
+
+  override async resolveRef(input: Parameters<MemoryGitProvider["resolveRef"]>[0]) {
+    if (this.rejectNextRefRead) {
+      this.rejectNextRefRead = false;
+      throw new Error("A just-updated GitHub ref was read before it became consistent.");
+    }
+    return super.resolveRef(input);
+  }
+
+  override async commitFiles(input: Parameters<GitProvider["commitFiles"]>[0]) {
+    if (input.message.includes("Resolve semantic conflicts with Staging")) {
+      this.rejectNextRefRead = false;
+    }
+    const committed = await super.commitFiles(input);
+    if (/^Resolve \d+ conflict\(s\) with Staging$/u.test(input.message)) {
+      this.rejectNextRefRead = true;
+    }
+    return committed;
   }
 }
 
@@ -240,7 +264,7 @@ describe("application commands", () => {
   it("resolves every semantic conflict against Staging and resets approval", async () => {
     const documentId = "doc_conflicted_home" as DocumentId;
     const path = "content/pages/conflicted-home/index.yaml";
-    const git = new MemoryGitProvider({
+    const git = new EventuallyConsistentMemoryGitProvider({
       [path]: yamlCodec.serialize({
         id: documentId,
         type: "pages",
