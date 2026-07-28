@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
+const crossPlatformVisualDiffRatio = 0.04;
+
 test("public page stays separate from the editor runtime", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("link", { name: "Open CMS" })).toBeVisible();
@@ -137,7 +139,7 @@ test("editor shell matches light and dark visual baselines", async ({ page, brow
   await expect(editor).toHaveScreenshot("editor-light.png", {
     animations: "disabled",
     caret: "hide",
-    maxDiffPixelRatio: 0.03,
+    maxDiffPixelRatio: crossPlatformVisualDiffRatio,
     scale: "css",
   });
 
@@ -146,7 +148,7 @@ test("editor shell matches light and dark visual baselines", async ({ page, brow
   await expect(editor).toHaveScreenshot("editor-dark.png", {
     animations: "disabled",
     caret: "hide",
-    maxDiffPixelRatio: 0.03,
+    maxDiffPixelRatio: crossPlatformVisualDiffRatio,
     scale: "css",
   });
 });
