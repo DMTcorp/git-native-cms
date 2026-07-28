@@ -52,6 +52,20 @@ function fixture() {
   return { application: createCmsApplication(dependencies), git, content, audit };
 }
 
+class StrictDeleteMemoryGitProvider extends MemoryGitProvider {
+  override async commitFiles(input: Parameters<MemoryGitProvider["commitFiles"]>[0]) {
+    for (const file of input.files) {
+      if (
+        file.content === null &&
+        (await this.readFile({ ref: input.branch, path: file.path })) === undefined
+      ) {
+        throw new Error(`Git Data API cannot delete missing path ${file.path}.`);
+      }
+    }
+    return super.commitFiles(input);
+  }
+}
+
 class TestReleaseStore implements ReleaseStore {
   readonly releases = new Map<ReleaseId, StoredRelease>();
   readonly pointers = new Map<EnvironmentPointer["environment"], EnvironmentPointer>();
@@ -761,7 +775,7 @@ describe("application commands", () => {
   });
 
   it("moves a Change through review and staging into an immutable production release", async () => {
-    const git = new MemoryGitProvider();
+    const git = new StrictDeleteMemoryGitProvider();
     const content = new MemoryContentRepository();
     const audit = new MemoryAuditSink();
     const releaseStore = new TestReleaseStore();
@@ -825,18 +839,6 @@ describe("application commands", () => {
       { ...context, actor: reviewer },
     );
     expect(staged.change.status).toBe("staging");
-    const locked = await application.lockStagingBatch.execute(
-      {
-        expectedRevision: staged.revision,
-        checklist: ["routes", "responsive", "localization"],
-        idempotencyKey: "workflow:lock-staging",
-      },
-      { ...context, actor: reviewer },
-    );
-    await expect(application.readStagingBatch.execute(context)).resolves.toMatchObject({
-      revision: locked.revision,
-      lock: { batchRevision: staged.revision, checklist: ["localization", "responsive", "routes"] },
-    });
 
     content.seed("main", {
       id: "doc_home" as DocumentId,
@@ -850,7 +852,7 @@ describe("application commands", () => {
     });
     const published = await application.publishStaging.execute(
       {
-        expectedStagingRevision: locked.revision,
+        expectedStagingRevision: staged.revision,
         title: "Release homepage",
         configVersion: 1,
         registryDigest: "sha256:test",
@@ -883,10 +885,44 @@ describe("application commands", () => {
       "change.submitted",
       "change.approved",
       "change.added-to-staging",
-      "staging.locked",
       "staging.promoted",
       "release.built-and-published",
     ]);
+  });
+
+  it("locks and idempotently unlocks a Staging release candidate", async () => {
+    const { application, git } = fixture();
+    const context = { actor: testActor, requestId: "req_staging_lock" };
+    const staging = await git.resolveRef("staging");
+    const locked = await application.lockStagingBatch.execute(
+      {
+        expectedRevision: staging.sha,
+        checklist: ["routes", "responsive", "localization"],
+        idempotencyKey: "staging-lock:lock",
+      },
+      context,
+    );
+    await expect(application.readStagingBatch.execute(context)).resolves.toMatchObject({
+      revision: locked.revision,
+      lock: { batchRevision: staging.sha, checklist: ["localization", "responsive", "routes"] },
+    });
+    const unlocked = await application.unlockStagingBatch.execute(
+      {
+        expectedRevision: locked.revision,
+        idempotencyKey: "staging-lock:unlock",
+      },
+      context,
+    );
+    await expect(
+      application.unlockStagingBatch.execute(
+        {
+          expectedRevision: unlocked.revision,
+          idempotencyKey: "staging-lock:unlock-again",
+        },
+        context,
+      ),
+    ).resolves.toEqual({ revision: unlocked.revision });
+    await expect(application.readStagingBatch.execute(context)).resolves.not.toHaveProperty("lock");
   });
 
   it("removes a staged Change through an auditable revert pull request", async () => {

@@ -3404,6 +3404,11 @@ async function markStagedChangesPublished(input: {
     return change === undefined ? [] : [{ path: file.path, change }];
   });
   if (changes.length === 0) return input.revision;
+  const stagingLock = await input.dependencies.git.readFile({
+    ref: branch,
+    path: STAGING_LOCK_PATH,
+    ...(input.context.signal === undefined ? {} : { signal: input.context.signal }),
+  });
   const committed = await input.dependencies.git.commitFiles({
     branch,
     expectedSha: input.revision,
@@ -3416,7 +3421,7 @@ async function markStagedChangesPublished(input: {
           updatedAt: isoTimestamp(input.dependencies.clock.now()),
         } satisfies Change),
       })),
-      { path: STAGING_LOCK_PATH, content: null },
+      ...(stagingLock === undefined ? [] : [{ path: STAGING_LOCK_PATH, content: null }]),
     ],
     message: `Prepare ${changes.length} Change(s) for publication`,
     author: input.context.actor,
