@@ -85,7 +85,18 @@ describe("asset usage safety", () => {
       checksum: "a".repeat(64),
       actor,
     });
-    expect(new URL(upload.url).searchParams.get("x-amz-meta-declaredsha256")).toBe("a".repeat(64));
+    const signedUrl = new URL(upload.url);
+    expect(signedUrl.searchParams.get("x-amz-meta-declaredsha256")).toBeNull();
+    expect(signedUrl.searchParams.get("X-Amz-SignedHeaders")).toContain(
+      "x-amz-meta-declaredsha256",
+    );
+    expect(upload.headers).toMatchObject({
+      "content-type": "image/png",
+      "x-amz-meta-declaredmime": "image/png",
+      "x-amz-meta-declaredsha256": "a".repeat(64),
+      "x-amz-meta-declaredsize": "4",
+      "x-amz-meta-originalfilename": "..-..-proof.png",
+    });
     expect(decodeURIComponent(upload.url)).not.toContain("/../");
     client.destroy();
   });

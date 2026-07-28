@@ -240,6 +240,14 @@ export class S3AssetStore implements AssetStore {
     const uploadId = `upl_${globalThis.crypto.randomUUID()}`;
     const fileName = safeFileName(input.fileName);
     const key = `uploads/${uploadId}/${fileName}`;
+    const uploadHeaders = {
+      "x-amz-meta-uploadid": uploadId,
+      "x-amz-meta-actorid": input.actor.id,
+      "x-amz-meta-declaredsize": String(input.size),
+      "x-amz-meta-declaredmime": input.mimeType,
+      "x-amz-meta-declaredsha256": checksum,
+      "x-amz-meta-originalfilename": fileName,
+    };
     const command = new PutObjectCommand({
       Bucket: this.options.bucket,
       Key: key,
@@ -256,6 +264,10 @@ export class S3AssetStore implements AssetStore {
     });
     const url = await getSignedUrl(this.options.client, command, {
       expiresIn: this.options.uploadTtlSeconds ?? 900,
+      // R2 does not persist S3 custom metadata hoisted into a presigned URL query.
+      // Keeping it in signed request headers also makes the upload declaration
+      // available to a later serverless invocation that has no in-memory session.
+      unhoistableHeaders: new Set(Object.keys(uploadHeaders)),
     });
     this.pending.set(uploadId, {
       id: uploadId,
@@ -271,6 +283,7 @@ export class S3AssetStore implements AssetStore {
       url,
       headers: {
         "content-type": input.mimeType,
+        ...uploadHeaders,
       },
     };
   }

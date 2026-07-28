@@ -58,8 +58,10 @@ The live smoke test initializes both hosted runtimes and verifies their public/e
 OAuth+PKCE redirect, scheduler and MCP authentication, the production pointer and its immutable
 manifest with the exact deployed registry digest.
 
-The opt-in live flow creates a real Change with a page plus pricing/navigation globals, updates
-the server-rendered preview, opens and independently approves a GitHub review, squash-merges to
-Staging, promotes with a release PR, verifies CDN delivery, atomically rolls back, and restores
-the verified release. It requires a production session secret supplied through a local
+The opt-in live flow creates a real Change with a page plus pricing/navigation globals, directly
+uploads an image to the separate R2 asset bucket, stores its metadata on the Change and selects it
+through the same media reference consumed by the editor. It then updates the server-rendered
+preview, opens and independently approves a GitHub review, squash-merges to Staging, promotes with
+a release PR, verifies the asset reference in immutable CDN JSON, atomically rolls back, and
+restores the verified release. It requires a production session secret supplied through a local
 permission-restricted file; the value is never printed.
