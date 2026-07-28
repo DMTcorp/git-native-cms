@@ -572,6 +572,22 @@ const releasedPageSource = await releasedPageResponse.text();
 if (!releasedPageResponse.ok || !releasedPageSource.includes(storedAsset.asset.id)) {
   throw new Error("The immutable CDN page does not contain the stable R2 asset reference.");
 }
+try {
+  await api(
+    reviewerSession,
+    "DELETE",
+    `assets/${encodeURIComponent(storedAsset.asset.id)}`,
+    {
+      changeId: change.id,
+      expectedRevision: published.mainRevision,
+      idempotencyKey: `live:${runId}:reject-released-asset-delete`,
+    },
+    `live:${runId}:reject-released-asset-delete`,
+  );
+  throw new Error("The CMS deleted an asset referenced by an immutable release.");
+} catch (error) {
+  if (!(error instanceof LiveApiError) || error.code !== "CMS_ASSET_009") throw error;
+}
 
 async function confirmation(action: "rollback"): Promise<string> {
   return (
