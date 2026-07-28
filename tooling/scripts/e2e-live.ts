@@ -110,6 +110,11 @@ const created = await api<{
   idempotencyKey: createKey,
 });
 const change = created.change;
+const initialHome = await api<{ readonly document: ContentDocument }>(
+  editorSession,
+  "GET",
+  `changes/${change.id}/documents/doc_home`,
+);
 
 async function createDocument(
   type: string,
@@ -154,7 +159,7 @@ const page = await createDocument(
       },
     },
   },
-  change.baseCommit,
+  initialHome.document.revision,
   "page",
 );
 const pricing = await createDocument(
@@ -178,11 +183,7 @@ const navigation = await createDocument(
   "navigation",
 );
 
-const home = await api<{ readonly document: ContentDocument }>(
-  editorSession,
-  "GET",
-  `changes/${change.id}/documents/doc_home`,
-);
+const home = initialHome;
 const updateKey = `live:${runId}:home`;
 const updated = await api<{ readonly document: ContentDocument }>(
   editorSession,
