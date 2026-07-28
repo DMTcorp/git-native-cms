@@ -111,6 +111,10 @@ test("editor shell has no serious WCAG 2.2 A or AA violations", async ({ page })
 
   await page.getByRole("button", { name: "Switch to dark theme" }).click();
   await expect(page.locator(".cms-app")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("button", { name: "Hide inspector" })).toHaveCSS(
+    "background-color",
+    "rgb(24, 33, 42)",
+  );
   const darkResult = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();

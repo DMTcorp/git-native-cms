@@ -761,8 +761,7 @@
     cursor: pointer;
     transition:
       border-color 120ms ease,
-      transform 120ms ease,
-      background 120ms ease;
+      transform 120ms ease;
   }
 
   .cms-button:hover {

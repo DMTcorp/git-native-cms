@@ -9,6 +9,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource/atkinson-hyperlegible": "catalog:",
+    "@fontsource/ibm-plex-mono": "catalog:",
+    "@fontsource/source-serif-4": "catalog:",
     "@git-native-cms/application": "workspace:*",
     "@git-native-cms/core": "workspace:*",
     "@git-native-cms/delivery": "workspace:*",
