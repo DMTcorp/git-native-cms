@@ -4,13 +4,18 @@ import type {
   AssetStore,
   AssetUsagePort,
   AuditEvent,
+  AuditQueryPort,
   AuditSink,
+  Clock,
   ContentRepository,
   DeploymentPort,
   EnvironmentPointer,
   GitProvider,
+  IdentityProvider,
+  IdGenerator,
   IdempotencyStore,
   PublicationNotifierPort,
+  PreviewSessionPort,
   RateLimitPort,
   ReleaseBuilderPort,
   ReleaseStore,
@@ -20,12 +25,14 @@ import type {
   SessionRecord,
   SessionStore,
   StoredRelease,
+  TeamProvisioningPort,
   TranslationProvider,
   WebhookReplayStore,
 } from "@git-native-cms/application";
 import type {
   Actor,
   AssetId,
+  ChangeId,
   ContentDocument,
   DocumentId,
   GitCommitSha,
@@ -139,6 +146,44 @@ export async function GitProviderContract(input: {
       );
     }),
   );
+  await input.provider.mergePullRequest({
+    number: pullRequest.number,
+    strategy: "squash",
+    expectedHeadSha: committed.sha,
+  });
+  const revert = await input.provider.createRevertPullRequest({
+    pullRequestNumber: pullRequest.number,
+    title: "Revert contract pull request",
+    body: "Adapter contract revert verification.",
+    idempotencyKey: `${input.branch}:revert`,
+  });
+  const repeatedRevert = await input.provider.createRevertPullRequest({
+    pullRequestNumber: pullRequest.number,
+    title: "Revert contract pull request",
+    body: "Adapter contract revert verification.",
+    idempotencyKey: `${input.branch}:revert`,
+  });
+  results.push(
+    await check("GitProvider/createRevertPullRequest is idempotent", () =>
+      same(revert, repeatedRevert),
+    ),
+  );
+  const revertHead = await input.provider.resolveRef(revert.head);
+  await input.provider.mergePullRequest({
+    number: revert.number,
+    strategy: "merge",
+    expectedHeadSha: revertHead.sha,
+  });
+  results.push(
+    await check("GitProvider/revert restores the base without rewriting history", async () => {
+      const restored = await input.provider.readFile({
+        ref: input.baseRef,
+        path: ".cms/contract.txt",
+      });
+      return restored === undefined;
+    }),
+  );
+  await input.provider.deleteBranch({ branch: revert.head });
   await input.provider.deleteBranch({ branch: input.branch });
   return results;
 }
@@ -181,6 +226,21 @@ export async function AssetStoreContract(input: {
       (await input.store.listAssets({})).items.some((asset) => asset.id === finalized.id),
     ),
   ];
+  const updated = await input.store.updateAssetMetadata({
+    id: finalized.id,
+    altText: "Adapter contract asset",
+    focalPoint: { x: 0.25, y: 0.75 },
+  });
+  results.push(
+    await check(
+      "AssetStore/updateAssetMetadata persists reviewed metadata",
+      async () =>
+        updated.altText === "Adapter contract asset" &&
+        updated.focalPoint?.x === 0.25 &&
+        updated.focalPoint.y === 0.75 &&
+        same(await input.store.readAsset(finalized.id), updated),
+    ),
+  );
   await input.store.deleteAsset(finalized.id);
   results.push(
     await check(
@@ -255,6 +315,91 @@ export async function SessionStoreContract(input: {
   return results;
 }
 
+export async function PreviewSessionPortContract(input: {
+  readonly sessions: PreviewSessionPort;
+  readonly actorId: Actor["id"];
+  readonly changeId: ChangeId;
+}): Promise<readonly ContractTestResult[]> {
+  const now = new Date("2026-07-27T12:00:00.000Z");
+  const issued = await input.sessions.issue({
+    actorId: input.actorId,
+    changeId: input.changeId,
+    frontendRef: "cms/contract-preview",
+    locale: "pl-PL",
+    now,
+  });
+  const verified = await input.sessions.verify({
+    id: issued.id,
+    token: issued.token,
+    now,
+  });
+  const refreshed = await input.sessions.refresh({
+    id: issued.id,
+    token: issued.token,
+    now: new Date("2026-07-27T12:01:00.000Z"),
+  });
+  return [
+    await check(
+      "PreviewSessionPort binds actor, Change, frontend ref and locale",
+      () =>
+        issued.actorId === input.actorId &&
+        issued.changeId === input.changeId &&
+        issued.frontendRef === "cms/contract-preview" &&
+        issued.locale === "pl-PL",
+    ),
+    await check("PreviewSessionPort verifies an issued token", () => same(verified, issued)),
+    await check(
+      "PreviewSessionPort refreshes without changing the actor or Change",
+      () =>
+        refreshed.actorId === issued.actorId &&
+        refreshed.changeId === issued.changeId &&
+        refreshed.expiresAt >= issued.expiresAt,
+    ),
+  ];
+}
+
+export async function TeamProvisioningPortContract(input: {
+  readonly provisioning: TeamProvisioningPort;
+}): Promise<readonly ContractTestResult[]> {
+  const firstMembers = await input.provisioning.listMembers();
+  const secondMembers = await input.provisioning.listMembers();
+  const firstTeams = await input.provisioning.listTeams();
+  const secondTeams = await input.provisioning.listTeams();
+  const invitation = await input.provisioning.invite({
+    email: "contract-editor@example.test",
+    role: "direct_member",
+  });
+  let membershipAdded = false;
+  const team = firstTeams[0];
+  if (team !== undefined) {
+    await input.provisioning.addMemberToTeam({
+      teamSlug: team.slug,
+      username: firstMembers[0]?.login ?? "contract-editor",
+      role: "member",
+    });
+    membershipAdded = true;
+  }
+  return [
+    await check("TeamProvisioningPort returns deterministic members", () =>
+      same(firstMembers, secondMembers),
+    ),
+    await check("TeamProvisioningPort returns deterministic teams", () =>
+      same(firstTeams, secondTeams),
+    ),
+    await check(
+      "TeamProvisioningPort creates an organization invitation",
+      () =>
+        invitation.role === "direct_member" &&
+        invitation.status === "pending" &&
+        invitation.id.length > 0,
+    ),
+    await check(
+      "TeamProvisioningPort accepts team membership operations",
+      () => team === undefined || membershipAdded,
+    ),
+  ];
+}
+
 export async function ReviewPortContract(input: {
   readonly review: ReviewPort;
   readonly pullRequestNumber: number;
@@ -265,11 +410,30 @@ export async function ReviewPortContract(input: {
     body: "Adapter contract review comment.",
   });
   const comments = await input.review.listComments(input.pullRequestNumber);
+  const resolved = await input.review.resolveComment({
+    pullRequestNumber: input.pullRequestNumber,
+    commentId: comment.id,
+    resolved: true,
+  });
+  const assigned = await input.review.assignReviewers({
+    pullRequestNumber: input.pullRequestNumber,
+    users: ["contract-reviewer"],
+    teams: ["contract-team"],
+  });
+  const listedReviewers = await input.review.listReviewers(input.pullRequestNumber);
   const firstChecks = await input.review.listChecks(input.ref);
   const secondChecks = await input.review.listChecks(input.ref);
   return [
     await check("ReviewPort lists a newly created comment", () =>
       comments.some((candidate) => candidate.id === comment.id),
+    ),
+    await check(
+      "ReviewPort resolves a conversation thread",
+      () => resolved.id === comment.id && resolved.resolved,
+    ),
+    await check(
+      "ReviewPort assigns and lists users and teams",
+      () => same(assigned, listedReviewers),
     ),
     await check("ReviewPort check reads are deterministic", () => same(firstChecks, secondChecks)),
     await check("ReviewPort returns valid check states", () =>
@@ -338,6 +502,18 @@ export async function ContentRepositoryContract(input: {
         (document) => document.id !== input.document.id,
       ),
     ),
+  );
+  results.push(
+    await check("ContentRepository reads project configuration", async () => {
+      const config = await input.repository.readProjectConfig(input.ref);
+      return Number.isSafeInteger(config.configVersion) && config.configVersion > 0;
+    }),
+  );
+  results.push(
+    await check("ContentRepository reads the registry lock", async () => {
+      const lock = await input.repository.readRegistryLock(input.ref);
+      return /^sha256:[a-f0-9]{64}$/iu.test(lock.registryDigest);
+    }),
   );
   return results;
 }
@@ -543,6 +719,62 @@ export async function IdempotencyStoreContract(input: {
   ];
 }
 
+export async function IdentityProviderContract(input: {
+  readonly provider: IdentityProvider;
+}): Promise<readonly ContractTestResult[]> {
+  const first = await input.provider.resolve("contract-token");
+  const second = await input.provider.resolve("contract-token");
+  return [
+    await check("IdentityProvider resolves deterministically", () => same(first, second)),
+    await check(
+      "IdentityProvider returns a usable principal",
+      () => first.externalId.length > 0 && first.login.length > 0 && first.displayName.length > 0,
+    ),
+    await check("IdentityProvider never returns credentials", () => {
+      const serialized = JSON.stringify(first).toLocaleLowerCase();
+      return !serialized.includes("contract-token") && !serialized.includes("accesstoken");
+    }),
+  ];
+}
+
+export async function ClockContract(input: {
+  readonly clock: Clock;
+}): Promise<readonly ContractTestResult[]> {
+  const first = input.clock.now();
+  const second = input.clock.now();
+  return [
+    await check(
+      "Clock returns valid defensive Date values",
+      () =>
+        Number.isFinite(first.getTime()) && Number.isFinite(second.getTime()) && first !== second,
+    ),
+  ];
+}
+
+export async function IdGeneratorContract(input: {
+  readonly ids: IdGenerator;
+}): Promise<readonly ContractTestResult[]> {
+  const changeIds = [input.ids.changeId(), input.ids.changeId()];
+  const documentIds = [input.ids.documentId(), input.ids.documentId()];
+  return [
+    await check(
+      "IdGenerator returns unique prefixed domain IDs",
+      () =>
+        new Set(changeIds).size === changeIds.length &&
+        changeIds.every((id) => id.startsWith("chg_")) &&
+        new Set(documentIds).size === documentIds.length &&
+        documentIds.every((id) => id.startsWith("doc_")),
+    ),
+    await check(
+      "IdGenerator emits workflow identities",
+      () =>
+        input.ids.scheduleId().startsWith("sch_") &&
+        input.ids.requestId().length > 0 &&
+        input.ids.suffix().length > 0,
+    ),
+  ];
+}
+
 export async function AuditSinkContract(input: {
   readonly sink: AuditSink;
   readonly readEvents: () => Promise<readonly AuditEvent[]>;
@@ -558,6 +790,51 @@ export async function AuditSinkContract(input: {
   return [
     await check("AuditSink durably records the event", async () =>
       (await input.readEvents()).some((candidate) => candidate.requestId === event.requestId),
+    ),
+  ];
+}
+
+export async function AuditQueryPortContract(input: {
+  readonly sink: AuditSink;
+  readonly query: AuditQueryPort;
+}): Promise<readonly ContractTestResult[]> {
+  const resourceId = `chg_contract_${globalThis.crypto.randomUUID()}`;
+  const unrelatedId = `chg_other_${globalThis.crypto.randomUUID()}`;
+  const events: readonly AuditEvent[] = [
+    {
+      type: "contract.started",
+      actorId: "act_contract",
+      requestId: globalThis.crypto.randomUUID(),
+      source: "ui",
+      timestamp: "2026-07-27T12:00:00.000Z",
+      resourceId,
+    },
+    {
+      type: "contract.unrelated",
+      actorId: "act_contract",
+      requestId: globalThis.crypto.randomUUID(),
+      source: "ui",
+      timestamp: "2026-07-27T12:01:00.000Z",
+      resourceId: unrelatedId,
+    },
+    {
+      type: "contract.completed",
+      actorId: "act_contract",
+      requestId: globalThis.crypto.randomUUID(),
+      source: "mcp",
+      timestamp: "2026-07-27T12:02:00.000Z",
+      resourceId,
+    },
+  ];
+  for (const event of events) await input.sink.write(event);
+  const listed = await input.query.list({ resourceId, limit: 1 });
+  return [
+    await check(
+      "AuditQueryPort filters a resource and returns newest events first",
+      () =>
+        listed.length === 1 &&
+        listed[0]?.type === "contract.completed" &&
+        listed[0]?.resourceId === resourceId,
     ),
   ];
 }

@@ -19,6 +19,17 @@ export interface S3AssetStoreOptions {
   readonly uploadTtlSeconds?: number;
   readonly maximumUploadBytes?: number;
   readonly allowedMimeTypes?: readonly string[];
+  readonly virusScanner?: AssetVirusScanner;
+}
+
+export interface AssetVirusScanner {
+  scan(input: {
+    readonly bytes: Uint8Array;
+    readonly fileName: string;
+    readonly mimeType: string;
+    readonly checksum: string;
+    readonly signal?: AbortSignal;
+  }): Promise<{ readonly clean: boolean; readonly threat?: string }>;
 }
 
 interface PendingUpload {
@@ -72,6 +83,7 @@ async function materializeAsset(
           fileName.split(".").at(-1) ??
           "unknown";
         return {
+          ...(variantHead.Metadata?.name === undefined ? {} : { name: variantHead.Metadata.name }),
           width: Number.isFinite(width) ? width : 0,
           height: Number.isFinite(height) ? height : 0,
           format,
@@ -87,6 +99,22 @@ async function materializeAsset(
     size: head.ContentLength ?? original.Size ?? 0,
     checksum,
     url: publicAssetUrl(options, original.Key),
+    ...(head.Metadata?.alttext === undefined ? {} : { altText: head.Metadata.alttext }),
+    ...(Number.isFinite(Number(head.Metadata?.width))
+      ? { width: Number(head.Metadata?.width) }
+      : {}),
+    ...(Number.isFinite(Number(head.Metadata?.height))
+      ? { height: Number(head.Metadata?.height) }
+      : {}),
+    ...(Number.isFinite(Number(head.Metadata?.focalx)) &&
+    Number.isFinite(Number(head.Metadata?.focaly))
+      ? {
+          focalPoint: {
+            x: Number(head.Metadata?.focalx),
+            y: Number(head.Metadata?.focaly),
+          },
+        }
+      : {}),
     ...(variants.length === 0
       ? {}
       : {
@@ -328,6 +356,29 @@ export class S3AssetStore implements AssetStore {
         retryable: false,
       });
     }
+    if (this.options.virusScanner !== undefined) {
+      const scan = await this.options.virusScanner.scan({
+        bytes: actual.bytes,
+        fileName: pending.fileName,
+        mimeType: pending.mimeType,
+        checksum,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      if (!scan.clean) {
+        await this.options.client.send(
+          new DeleteObjectCommand({ Bucket: this.options.bucket, Key: pending.key }),
+          input.signal === undefined ? undefined : { abortSignal: input.signal },
+        );
+        this.pending.delete(input.uploadId);
+        throw new CmsError({
+          code: "CMS_ASSET_010",
+          message: "The upload was rejected by the configured malware scanner.",
+          category: "validation",
+          retryable: false,
+          ...(scan.threat === undefined ? {} : { context: { threat: scan.threat } }),
+        });
+      }
+    }
     const id = `ast_${checksum.slice(0, 24)}` as AssetId;
     const assetKey = `assets/${checksum}/${pending.fileName}`;
     await this.options.client.send(
@@ -367,6 +418,77 @@ export class S3AssetStore implements AssetStore {
   async readAsset(id: AssetId): Promise<Asset | undefined> {
     const result = await this.listAssets({});
     return result.items.find((asset) => asset.id === id);
+  }
+
+  async updateAssetMetadata(
+    input: Parameters<AssetStore["updateAssetMetadata"]>[0],
+  ): Promise<Asset> {
+    input.signal?.throwIfAborted();
+    const existing = await this.readAsset(input.id);
+    if (existing === undefined) {
+      throw new CmsError({
+        code: "CMS_ASSET_404",
+        message: "The selected asset does not exist.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    const listed = await this.options.client.send(
+      new ListObjectsV2Command({
+        Bucket: this.options.bucket,
+        Prefix: `assets/${existing.checksum.toLowerCase()}/`,
+      }),
+      input.signal === undefined ? undefined : { abortSignal: input.signal },
+    );
+    const key = listed.Contents?.find((object) => object.Key?.split("/").length === 3)?.Key;
+    if (key === undefined) {
+      throw new CmsError({
+        code: "CMS_ASSET_404",
+        message: "The selected asset object does not exist.",
+        category: "storage",
+        retryable: false,
+      });
+    }
+    const head = await this.options.client.send(
+      new HeadObjectCommand({ Bucket: this.options.bucket, Key: key }),
+      input.signal === undefined ? undefined : { abortSignal: input.signal },
+    );
+    const stableMetadata = { ...(head.Metadata ?? {}) };
+    delete stableMetadata.alttext;
+    delete stableMetadata.focalx;
+    delete stableMetadata.focaly;
+    await this.options.client.send(
+      new CopyObjectCommand({
+        Bucket: this.options.bucket,
+        Key: key,
+        CopySource: encodeURIComponent(`${this.options.bucket}/${key}`).replaceAll("%2F", "/"),
+        MetadataDirective: "REPLACE",
+        ContentType: head.ContentType ?? existing.mimeType,
+        CacheControl: head.CacheControl ?? "public, max-age=31536000, immutable",
+        Metadata: {
+          ...stableMetadata,
+          assetId: existing.id,
+          sha256: existing.checksum,
+          originalFileName: existing.fileName,
+          ...(input.altText === undefined ? {} : { altText: input.altText }),
+          ...(input.focalPoint === undefined
+            ? {}
+            : {
+                focalX: String(input.focalPoint.x),
+                focalY: String(input.focalPoint.y),
+              }),
+        },
+      }),
+      input.signal === undefined ? undefined : { abortSignal: input.signal },
+    );
+    const stable = { ...existing };
+    delete stable.altText;
+    delete stable.focalPoint;
+    return {
+      ...stable,
+      ...(input.altText === undefined ? {} : { altText: input.altText }),
+      ...(input.focalPoint === undefined ? {} : { focalPoint: input.focalPoint }),
+    };
   }
 
   async deleteAsset(id: AssetId, signal?: AbortSignal): Promise<void> {

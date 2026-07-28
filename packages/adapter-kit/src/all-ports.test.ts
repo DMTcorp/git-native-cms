@@ -3,6 +3,7 @@ import type {
   AuditEvent,
   DeploymentPort,
   PublicationNotifierPort,
+  PreviewSession,
   RateLimitPort,
   RevalidationPort,
   ReviewCheck,
@@ -29,6 +30,7 @@ import { describe, expect, it } from "vitest";
 import {
   AssetProcessorPortContract,
   AssetUsagePortContract,
+  AuditQueryPortContract,
   AuditSinkContract,
   ContentRepositoryContract,
   contractPassed,
@@ -40,6 +42,8 @@ import {
   RevalidationPortContract,
   ReviewPortContract,
   SchedulerPortContract,
+  PreviewSessionPortContract,
+  TeamProvisioningPortContract,
   TranslationProviderContract,
   WebhookReplayStoreContract,
 } from "./contracts.js";
@@ -72,6 +76,7 @@ function passed(results: readonly { readonly passed: boolean; readonly details?:
 
 class ContractReviewPort implements ReviewPort {
   readonly comments: ReviewComment[] = [];
+  private assignment = { users: [] as string[], teams: [] as string[] };
   readonly checks: ReviewCheck[] = [
     { name: "contract", status: "completed", conclusion: "success", required: true },
   ];
@@ -82,6 +87,7 @@ class ContractReviewPort implements ReviewPort {
       author: "contract",
       body: input.body,
       createdAt: "2026-07-27T12:00:00.000Z",
+      resolved: false,
     };
     this.comments.push(comment);
     return comment;
@@ -89,6 +95,31 @@ class ContractReviewPort implements ReviewPort {
 
   async listComments(): Promise<readonly ReviewComment[]> {
     return this.comments;
+  }
+
+  async resolveComment(
+    input: Parameters<ReviewPort["resolveComment"]>[0],
+  ): Promise<ReviewComment> {
+    const index = this.comments.findIndex((comment) => comment.id === input.commentId);
+    const current = this.comments[index];
+    if (current === undefined) throw new Error("comment missing");
+    const updated = { ...current, resolved: input.resolved };
+    this.comments[index] = updated;
+    return updated;
+  }
+
+  async assignReviewers(
+    input: Parameters<ReviewPort["assignReviewers"]>[0],
+  ): Promise<{ readonly users: readonly string[]; readonly teams: readonly string[] }> {
+    this.assignment = { users: [...input.users], teams: [...input.teams] };
+    return this.assignment;
+  }
+
+  async listReviewers(): Promise<{
+    readonly users: readonly string[];
+    readonly teams: readonly string[];
+  }> {
+    return this.assignment;
   }
 
   async listChecks(): Promise<readonly ReviewCheck[]> {
@@ -259,5 +290,84 @@ describe("all application capability port contracts", () => {
         readEvents: async (): Promise<readonly AuditEvent[]> => audit.events,
       }),
     );
+    passed(await AuditQueryPortContract({ sink: audit, query: audit }));
+  });
+
+  it("covers preview session and GitHub organization provisioning adapters", async () => {
+    let previewSession: PreviewSession = {
+      id: "prv_contract",
+      actorId: "act_contract" as PreviewSession["actorId"],
+      changeId: "chg_contract" as PreviewSession["changeId"],
+      frontendRef: "cms/contract-preview",
+      locale: "pl-PL",
+      createdAt: "2026-07-27T12:00:00.000Z",
+      expiresAt: "2026-07-27T12:05:00.000Z",
+      token: "contract-token",
+    };
+    passed(
+      await PreviewSessionPortContract({
+        sessions: {
+          async issue(input) {
+            previewSession = {
+              ...previewSession,
+              actorId: input.actorId,
+              changeId: input.changeId,
+              frontendRef: input.frontendRef,
+              locale: input.locale,
+              createdAt: input.now.toISOString(),
+            };
+            return previewSession;
+          },
+          async verify() {
+            return previewSession;
+          },
+          async refresh(input) {
+            previewSession = {
+              ...previewSession,
+              id: "prv_contract_refreshed",
+              createdAt: input.now.toISOString(),
+              expiresAt: "2026-07-27T12:06:00.000Z",
+              token: "contract-token-refreshed",
+            };
+            return previewSession;
+          },
+        },
+        actorId: previewSession.actorId,
+        changeId: previewSession.changeId,
+      }),
+    );
+
+    const memberships: string[] = [];
+    passed(
+      await TeamProvisioningPortContract({
+        provisioning: {
+          async listMembers() {
+            return [
+              {
+                id: "1",
+                login: "contract-editor",
+                displayName: "Contract Editor",
+                organizationRole: "member",
+              },
+            ];
+          },
+          async listTeams() {
+            return [{ id: "1", slug: "editors", name: "Editors" }];
+          },
+          async invite(input) {
+            return {
+              id: "1",
+              role: input.role,
+              ...(input.email === undefined ? {} : { email: input.email }),
+              status: "pending",
+            };
+          },
+          async addMemberToTeam(input) {
+            memberships.push(`${input.teamSlug}:${input.username}:${input.role}`);
+          },
+        },
+      }),
+    );
+    expect(memberships).toEqual(["editors:contract-editor:member"]);
   });
 });

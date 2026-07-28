@@ -12,20 +12,35 @@ import {
   type ReleaseId,
   type Revision,
 } from "@git-native-cms/core";
-import { applyPatches, mergeDocuments, type ContentPatch } from "@git-native-cms/document-model";
+import {
+  applyPatch,
+  applyPatches,
+  contentPath,
+  mergeDocuments,
+  parseContentPath,
+  type ContentPatch,
+  type ContentPath,
+} from "@git-native-cms/document-model";
 import { buildChangeBranchName, changeCommitMessage } from "@git-native-cms/git";
 import { importXliff } from "@git-native-cms/localization";
 import { buildReferenceGraph, buildSearchIndex } from "@git-native-cms/search";
 import { auditSeo, buildHreflang, buildSitemap, type SeoMetadata } from "@git-native-cms/seo";
-import type { AuthorizationService } from "@git-native-cms/permissions";
+import {
+  parsePermissionConfiguration,
+  type AuthorizationService,
+  type TeamRoleMapping,
+} from "@git-native-cms/permissions";
 import type {
   AuditSink,
+  AuditEvent,
+  AuditQueryPort,
   Asset,
   AssetStore,
   AssetProcessorPort,
   AssetUsagePort,
   Clock,
   ContentRepository,
+  ContentScheduleAction,
   DocumentSummary,
   EnvironmentPointer,
   GitProvider,
@@ -33,12 +48,19 @@ import type {
   IdempotencyStore,
   PullRequest,
   PublicationNotifierPort,
+  PreviewSession,
+  PreviewSessionPort,
   ReleaseBuilderPort,
+  ReviewAssignment,
   ReviewComment,
   ReviewPort,
   ReleaseStore,
   SchedulerPort,
   StoredRelease,
+  TeamInvitation,
+  TeamMember,
+  TeamProvisioningPort,
+  OrganizationTeam,
   TranslationProvider,
 } from "./ports.js";
 
@@ -58,6 +80,7 @@ export interface CommandDependencies {
   readonly ids: IdGenerator;
   readonly idempotency: IdempotencyStore;
   readonly audit: AuditSink;
+  readonly auditQuery?: AuditQueryPort;
   readonly releaseStore?: ReleaseStore;
   readonly releaseBuilder?: ReleaseBuilderPort;
   readonly review?: ReviewPort;
@@ -66,6 +89,8 @@ export interface CommandDependencies {
   readonly assetProcessor?: AssetProcessorPort;
   readonly scheduler?: SchedulerPort;
   readonly publicationNotifier?: PublicationNotifierPort;
+  readonly previewSessions?: PreviewSessionPort;
+  readonly teamProvisioning?: TeamProvisioningPort;
   readonly translationProvider?: TranslationProvider;
   readonly mainBranch?: string;
   readonly stagingBranch?: string;
@@ -149,10 +174,27 @@ export interface ChangeTransitionResult {
   readonly pullRequest?: PullRequest;
 }
 
+export interface ChangeConflict {
+  readonly documentId: DocumentId;
+  readonly path: ContentPath;
+  readonly base: unknown;
+  readonly change: unknown;
+  readonly staging: unknown;
+  readonly scope: "field" | "document";
+}
+
+export interface ChangeConflictResolution {
+  readonly documentId: DocumentId;
+  readonly path: ContentPath;
+  readonly choice: "change" | "staging";
+}
+
 export interface CreateChangeCommand {
   readonly name: string;
   readonly description?: string;
   readonly baseBranch?: string;
+  readonly collaborators?: readonly string[];
+  readonly targetDate?: string;
   readonly idempotencyKey: string;
   readonly emergency?: boolean;
 }
@@ -162,21 +204,88 @@ export class CreateChangeHandler {
 
   async execute(command: CreateChangeCommand, context: RequestContext): Promise<Change> {
     this.dependencies.authorization.assert(context.actor, "change.create");
+    const name = command.name.trim();
+    if (name.length < 2 || name.length > 120) {
+      throw new CmsError({
+        code: "CMS_CHANGE_010",
+        message: "Change name must contain between 2 and 120 characters.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    const collaborators = [
+      ...new Set(
+        (command.collaborators ?? [])
+          .map((value) => value.trim().replace(/^@/u, ""))
+          .filter(Boolean),
+      ),
+    ];
+    if (
+      collaborators.length > 20 ||
+      collaborators.some(
+        (value) =>
+          value.length > 100 ||
+          !/^(?:team:)?[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/u.test(value),
+      )
+    ) {
+      throw new CmsError({
+        code: "CMS_CHANGE_012",
+        message: "Collaborators must contain at most 20 GitHub users or team:slug values.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    const targetDateValue =
+      command.targetDate === undefined
+        ? undefined
+        : new Date(`${command.targetDate}T00:00:00.000Z`);
+    if (
+      command.targetDate !== undefined &&
+      (!/^\d{4}-\d{2}-\d{2}$/u.test(command.targetDate) ||
+        targetDateValue === undefined ||
+        !Number.isFinite(targetDateValue.getTime()) ||
+        !targetDateValue.toISOString().startsWith(command.targetDate))
+    ) {
+      throw new CmsError({
+        code: "CMS_CHANGE_013",
+        message: "The target date must use YYYY-MM-DD.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    const requestedBaseBranch =
+      command.emergency === true
+        ? mainBranch(this.dependencies)
+        : (command.baseBranch ?? mainBranch(this.dependencies));
+    if (
+      requestedBaseBranch !== mainBranch(this.dependencies) &&
+      requestedBaseBranch !== stagingBranch(this.dependencies)
+    ) {
+      throw new CmsError({
+        code: "CMS_CHANGE_014",
+        message: "A Change can only start from the configured Production or Staging branch.",
+        category: "validation",
+        retryable: false,
+      });
+    }
     return once(this.dependencies.idempotency, command.idempotencyKey, async () => {
-      const baseBranch = command.baseBranch ?? mainBranch(this.dependencies);
+      const baseBranch = requestedBaseBranch;
       const base = await this.dependencies.git.resolveRef(baseBranch, context.signal);
       const id = this.dependencies.ids.changeId();
       const now = isoTimestamp(this.dependencies.clock.now());
       const branchName = buildChangeBranchName({
         actor: context.actor,
-        name: command.name,
+        name,
         suffix: this.dependencies.ids.suffix(),
         ...(command.emergency === undefined ? {} : { emergency: command.emergency }),
       });
       const change: Change = {
         id,
-        name: command.name,
+        name,
         ...(command.description === undefined ? {} : { description: command.description }),
+        ...(collaborators.length === 0 ? {} : { collaborators }),
+        ...(command.targetDate === undefined ? {} : { targetDate: command.targetDate }),
+        ...(command.emergency === true ? { emergency: true } : {}),
         ownerId: context.actor.id,
         baseBranch,
         baseCommit: base.sha,
@@ -204,6 +313,245 @@ export class CreateChangeHandler {
         branchName,
       });
       return change;
+    });
+  }
+}
+
+export class UpdateChangeHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly name?: string;
+      readonly description?: string | null;
+      readonly expectedRevision: GitCommitSha;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly change: Change; readonly revision: GitCommitSha }> {
+    this.dependencies.authorization.assert(context.actor, "change.edit", {
+      ownerId: input.change.ownerId,
+      policy: { ownerOnly: ["change.edit"] },
+    });
+    if (!["draft", "changes_requested"].includes(input.change.status)) {
+      throw new CmsError({
+        code: "CMS_CHANGE_005",
+        message: "Only an editable Change can be updated.",
+        category: "conflict",
+        retryable: false,
+      });
+    }
+    const name = input.name?.trim();
+    if (name !== undefined && (name.length < 2 || name.length > 120)) {
+      throw new CmsError({
+        code: "CMS_CHANGE_010",
+        message: "Change name must contain between 2 and 120 characters.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    if (
+      input.description !== undefined &&
+      input.description !== null &&
+      input.description.length > 4_000
+    ) {
+      throw new CmsError({
+        code: "CMS_CHANGE_011",
+        message: "Change description cannot exceed 4,000 characters.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const current = await this.dependencies.git.resolveRef(
+        input.change.branchName,
+        context.signal,
+      );
+      if (current.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_CHANGE_003",
+          message: "The Change moved before its details could be updated.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const stable = { ...input.change };
+      delete stable.description;
+      const change: Change = {
+        ...stable,
+        ...(input.description === undefined
+          ? input.change.description === undefined
+            ? {}
+            : { description: input.change.description }
+          : input.description === null || input.description.trim().length === 0
+            ? {}
+            : { description: input.description.trim() }),
+        ...(name === undefined ? {} : { name }),
+        updatedAt: isoTimestamp(this.dependencies.clock.now()),
+      };
+      const committed = await this.dependencies.git.commitFiles({
+        branch: change.branchName,
+        expectedSha: input.expectedRevision,
+        files: [{ path: ".cms/change.yaml", content: yamlCodec.serialize(change) }],
+        message: changeCommitMessage(change, `Update Change "${change.name}"`),
+        author: context.actor,
+        idempotencyKey: input.idempotencyKey,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "change.updated",
+        change.id,
+      );
+      return { change, revision: committed.sha };
+    });
+  }
+}
+
+export class DeleteChangeHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly expectedRevision: GitCommitSha;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly changeId: Change["id"] }> {
+    this.dependencies.authorization.assert(context.actor, "change.edit", {
+      ownerId: input.change.ownerId,
+      policy: { ownerOnly: ["change.edit"] },
+    });
+    if (input.change.status !== "draft" || input.change.pullRequestNumber !== undefined) {
+      throw new CmsError({
+        code: "CMS_CHANGE_012",
+        message:
+          "Only a draft Change without a pull request can be deleted; archive reviewed work.",
+        category: "conflict",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const current = await this.dependencies.git.resolveRef(
+        input.change.branchName,
+        context.signal,
+      );
+      if (current.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_CHANGE_003",
+          message: "The Change moved before it could be deleted.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      await this.dependencies.git.deleteBranch({
+        branch: input.change.branchName,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "change.deleted",
+        input.change.id,
+      );
+      return { changeId: input.change.id };
+    });
+  }
+}
+
+export class CommitChangeHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly documents: readonly {
+        readonly documentId: DocumentId;
+        readonly patches: readonly ContentPatch[];
+      }[];
+      readonly expectedRevision: Revision;
+      readonly message?: string;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly documents: readonly ContentDocument[]; readonly revision: Revision }> {
+    this.dependencies.authorization.assert(context.actor, "change.edit", {
+      ownerId: input.change.ownerId,
+      policy: { ownerOnly: ["change.edit"] },
+    });
+    if (!["draft", "changes_requested"].includes(input.change.status)) {
+      throw new CmsError({
+        code: "CMS_CHANGE_005",
+        message: "Only an editable Change can save a version.",
+        category: "conflict",
+        retryable: false,
+      });
+    }
+    if (input.documents.length === 0 || input.documents.length > 100) {
+      throw new CmsError({
+        code: "CMS_DOCUMENT_010",
+        message: "A version must contain between 1 and 100 changed documents.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    if (
+      new Set(input.documents.map((document) => document.documentId)).size !==
+      input.documents.length
+    ) {
+      throw new CmsError({
+        code: "CMS_DOCUMENT_011",
+        message: "A version cannot contain the same document more than once.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const documents = await Promise.all(
+        input.documents.map(async (update) => {
+          const current = await this.dependencies.content.readDocument({
+            ref: input.change.branchName,
+            documentId: update.documentId,
+            ...(context.signal === undefined ? {} : { signal: context.signal }),
+          });
+          if (current.revision !== input.expectedRevision) {
+            throw new CmsError({
+              code: "CMS_CHANGE_003",
+              message: "A document changed before this version could be saved.",
+              category: "conflict",
+              retryable: true,
+              context: { documentId: update.documentId },
+            });
+          }
+          return { ...current, data: applyPatches(current.data, update.patches) };
+        }),
+      );
+      const revision = await this.dependencies.content.writeDocuments({
+        ref: input.change.branchName,
+        documents,
+        expectedRevision: input.expectedRevision,
+        message:
+          input.message?.trim() ||
+          changeCommitMessage(input.change, `Save version (${documents.length} documents)`),
+        actor: context.actor,
+        idempotencyKey: input.idempotencyKey,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const saved = documents.map((document) => ({ ...document, revision }));
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "change.version-saved",
+        input.change.id,
+        { documents: documents.map((document) => document.id), revision },
+      );
+      return { documents: saved, revision };
     });
   }
 }
@@ -628,6 +976,35 @@ export class CreateAssetUploadHandler {
   }
 }
 
+export class ReceiveAssetUploadHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly uploadId: string;
+      readonly bytes: Uint8Array;
+      readonly mimeType: string;
+      readonly token?: string;
+    },
+    context: RequestContext,
+  ): Promise<void> {
+    this.dependencies.authorization.assert(context.actor, "asset.upload");
+    const store = configuredAssetStore(this.dependencies);
+    if (store.uploadBytes === undefined) {
+      throw new CmsError({
+        code: "CMS_ASSET_011",
+        message: "This asset adapter only accepts direct signed storage uploads.",
+        category: "configuration",
+        retryable: false,
+      });
+    }
+    await store.uploadBytes({
+      ...input,
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+    });
+  }
+}
+
 export class FinalizeAssetUploadHandler {
   constructor(private readonly dependencies: CommandDependencies) {}
 
@@ -749,10 +1126,526 @@ export class DeleteAssetHandler {
   }
 }
 
+export class UpdateAssetHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly assetId: AssetId;
+      readonly altText?: string | null;
+      readonly focalPoint?: { readonly x: number; readonly y: number } | null;
+      readonly expectedRevision: GitCommitSha;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly asset: Asset; readonly revision: GitCommitSha }> {
+    this.dependencies.authorization.assert(context.actor, "asset.edit", {
+      ownerId: input.change.ownerId,
+      policy: { ownerOnly: ["asset.edit"] },
+    });
+    if (
+      input.altText !== undefined &&
+      input.altText !== null &&
+      input.altText.trim().length > 1_000
+    ) {
+      throw new CmsError({
+        code: "CMS_ASSET_012",
+        message: "Asset alternative text cannot exceed 1,000 characters.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    if (
+      input.focalPoint !== undefined &&
+      input.focalPoint !== null &&
+      (![input.focalPoint.x, input.focalPoint.y].every(Number.isFinite) ||
+        input.focalPoint.x < 0 ||
+        input.focalPoint.x > 1 ||
+        input.focalPoint.y < 0 ||
+        input.focalPoint.y > 1)
+    ) {
+      throw new CmsError({
+        code: "CMS_ASSET_013",
+        message: "Asset focal point coordinates must be numbers between 0 and 1.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const store = configuredAssetStore(this.dependencies);
+      const existing = await store.readAsset(input.assetId, context.signal);
+      if (existing === undefined) {
+        throw new CmsError({
+          code: "CMS_ASSET_404",
+          message: "The selected asset does not exist.",
+          category: "validation",
+          retryable: false,
+        });
+      }
+      const currentRef = await this.dependencies.git.resolveRef(
+        input.change.branchName,
+        context.signal,
+      );
+      if (currentRef.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_CHANGE_003",
+          message: "The Change moved before asset metadata could be updated.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const stableAsset = { ...existing };
+      delete stableAsset.altText;
+      delete stableAsset.focalPoint;
+      const asset: Asset = {
+        ...stableAsset,
+        ...(input.altText === undefined
+          ? existing.altText === undefined
+            ? {}
+            : { altText: existing.altText }
+          : input.altText === null || input.altText.trim().length === 0
+            ? {}
+            : { altText: input.altText.trim() }),
+        ...(input.focalPoint === undefined
+          ? existing.focalPoint === undefined
+            ? {}
+            : { focalPoint: existing.focalPoint }
+          : input.focalPoint === null
+            ? {}
+            : { focalPoint: input.focalPoint }),
+      };
+      const stored = await store.updateAssetMetadata({
+        id: asset.id,
+        ...(asset.altText === undefined ? {} : { altText: asset.altText }),
+        ...(asset.focalPoint === undefined ? {} : { focalPoint: asset.focalPoint }),
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      let committed: Awaited<ReturnType<GitProvider["commitFiles"]>>;
+      try {
+        committed = await this.dependencies.git.commitFiles({
+          branch: input.change.branchName,
+          expectedSha: input.expectedRevision,
+          files: [
+            {
+              path: `.cms/assets/${stored.id}.yaml`,
+              content: yamlCodec.serialize(stored),
+            },
+          ],
+          message: changeCommitMessage(input.change, `Update asset ${stored.fileName}`),
+          author: context.actor,
+          idempotencyKey: `${input.idempotencyKey}:metadata`,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+      } catch (cause) {
+        try {
+          await store.updateAssetMetadata({
+            id: existing.id,
+            ...(existing.altText === undefined ? {} : { altText: existing.altText }),
+            ...(existing.focalPoint === undefined ? {} : { focalPoint: existing.focalPoint }),
+            ...(context.signal === undefined ? {} : { signal: context.signal }),
+          });
+        } catch (compensationCause) {
+          throw new CmsError({
+            code: "CMS_ASSET_014",
+            message:
+              "Asset metadata could not be committed or restored. Retry after refreshing the Change.",
+            category: "storage",
+            retryable: true,
+            context: { assetId: existing.id },
+            cause: new AggregateError([cause, compensationCause]),
+          });
+        }
+        throw cause;
+      }
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "asset.updated",
+        asset.id,
+        { changeId: input.change.id },
+      );
+      return { asset: stored, revision: committed.sha };
+    });
+  }
+}
+
+function configuredPreviewSessions(dependencies: CommandDependencies): PreviewSessionPort {
+  if (dependencies.previewSessions === undefined) {
+    throw new CmsError({
+      code: "CMS_PREVIEW_002",
+      message: "Preview sessions are not configured.",
+      category: "configuration",
+      retryable: false,
+    });
+  }
+  return dependencies.previewSessions;
+}
+
+function assertPreviewOwner(session: PreviewSession, context: RequestContext): void {
+  if (session.actorId !== context.actor.id) {
+    throw new CmsError({
+      code: "CMS_PREVIEW_003",
+      message: "This preview session belongs to another actor.",
+      category: "authorization",
+      retryable: false,
+    });
+  }
+}
+
+export class CreatePreviewSessionHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly frontendRef: string;
+      readonly locale: string;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<PreviewSession> {
+    this.dependencies.authorization.assert(context.actor, "project.read");
+    if (
+      input.frontendRef.trim().length === 0 ||
+      input.frontendRef.length > 200 ||
+      !/^[a-zA-Z0-9._/@:-]+$/u.test(input.frontendRef)
+    ) {
+      throw new CmsError({
+        code: "CMS_PREVIEW_004",
+        message: "The preview frontend ref is invalid.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    if (!/^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/u.test(input.locale)) {
+      throw new CmsError({
+        code: "CMS_PREVIEW_005",
+        message: "The preview locale is invalid.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const session = await configuredPreviewSessions(this.dependencies).issue({
+        actorId: context.actor.id,
+        changeId: input.change.id,
+        frontendRef: input.frontendRef,
+        locale: input.locale,
+        now: this.dependencies.clock.now(),
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "preview.session-created",
+        session.id,
+        { changeId: input.change.id, frontendRef: input.frontendRef, locale: input.locale },
+      );
+      return session;
+    });
+  }
+}
+
+export class ReadPreviewSessionHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: { readonly id: string; readonly token: string },
+    context: RequestContext,
+  ): Promise<PreviewSession> {
+    this.dependencies.authorization.assert(context.actor, "project.read");
+    const session = await configuredPreviewSessions(this.dependencies).verify({
+      id: input.id,
+      token: input.token,
+      now: this.dependencies.clock.now(),
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+    });
+    assertPreviewOwner(session, context);
+    return session;
+  }
+}
+
+export class RefreshPreviewSessionHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: { readonly id: string; readonly token: string; readonly idempotencyKey: string },
+    context: RequestContext,
+  ): Promise<PreviewSession> {
+    this.dependencies.authorization.assert(context.actor, "project.read");
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const current = await configuredPreviewSessions(this.dependencies).verify({
+        id: input.id,
+        token: input.token,
+        now: this.dependencies.clock.now(),
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      assertPreviewOwner(current, context);
+      const refreshed = await configuredPreviewSessions(this.dependencies).refresh({
+        id: input.id,
+        token: input.token,
+        now: this.dependencies.clock.now(),
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "preview.session-refreshed",
+        refreshed.id,
+        { previousSessionId: input.id, changeId: refreshed.changeId },
+      );
+      return refreshed;
+    });
+  }
+}
+
+function configuredTeamProvisioning(dependencies: CommandDependencies): TeamProvisioningPort {
+  if (dependencies.teamProvisioning === undefined) {
+    throw new CmsError({
+      code: "CMS_TEAM_003",
+      message: "GitHub organization team provisioning is not configured.",
+      category: "configuration",
+      retryable: false,
+    });
+  }
+  return dependencies.teamProvisioning;
+}
+
+export class ReadTeamDirectoryHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(context: RequestContext): Promise<{
+    readonly members: readonly TeamMember[];
+    readonly teams: readonly OrganizationTeam[];
+  }> {
+    this.dependencies.authorization.assert(context.actor, "team.manage");
+    const provisioning = configuredTeamProvisioning(this.dependencies);
+    const [members, teams] = await Promise.all([
+      provisioning.listMembers(context.signal),
+      provisioning.listTeams(context.signal),
+    ]);
+    return { members, teams };
+  }
+}
+
+export class InviteTeamMemberHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly email?: string;
+      readonly inviteeId?: number;
+      readonly role: "direct_member" | "admin";
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<TeamInvitation> {
+    this.dependencies.authorization.assert(context.actor, "team.manage");
+    if (input.email !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(input.email)) {
+      throw new CmsError({
+        code: "CMS_TEAM_004",
+        message: "A valid invitation email address is required.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    if (
+      (input.email === undefined) === (input.inviteeId === undefined) ||
+      (input.inviteeId !== undefined &&
+        (!Number.isSafeInteger(input.inviteeId) || input.inviteeId <= 0))
+    ) {
+      throw new CmsError({
+        code: "CMS_TEAM_001",
+        message: "Invite exactly one valid GitHub user ID or email address.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const invitation = await configuredTeamProvisioning(this.dependencies).invite({
+        ...(input.email === undefined ? {} : { email: input.email }),
+        ...(input.inviteeId === undefined ? {} : { inviteeId: input.inviteeId }),
+        role: input.role,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "team.member-invited",
+        invitation.id,
+        { role: invitation.role },
+      );
+      return invitation;
+    });
+  }
+}
+
+export class AddTeamMemberHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly teamSlug: string;
+      readonly username: string;
+      readonly role: "member" | "maintainer";
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<void> {
+    this.dependencies.authorization.assert(context.actor, "team.manage");
+    if (
+      !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,98}[a-zA-Z0-9])?$/u.test(input.username) ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/u.test(input.teamSlug)
+    ) {
+      throw new CmsError({
+        code: "CMS_TEAM_005",
+        message: "GitHub username or team slug is invalid.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    await once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      await configuredTeamProvisioning(this.dependencies).addMemberToTeam({
+        teamSlug: input.teamSlug,
+        username: input.username,
+        role: input.role,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "team.member-added",
+        input.username,
+        { team: input.teamSlug, role: input.role },
+      );
+    });
+  }
+}
+
+export class UpdateTeamRoleMappingsHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly mappings: readonly TeamRoleMapping[];
+      readonly customRoles?: readonly {
+        readonly name: string;
+        readonly actions: readonly string[];
+      }[];
+      readonly expectedRevision: GitCommitSha;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly pullRequest: PullRequest; readonly revision: GitCommitSha }> {
+    this.dependencies.authorization.assert(context.actor, "team.manage");
+    if (
+      input.mappings.length > 100 ||
+      input.mappings.some(
+        (mapping) =>
+          mapping.team.trim().length === 0 ||
+          mapping.roles.length === 0 ||
+          mapping.roles.some((role) => String(role).trim().length === 0),
+      )
+    ) {
+      throw new CmsError({
+        code: "CMS_TEAM_006",
+        message: "Team role mappings must contain a team and at least one role.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const main = await this.dependencies.git.resolveRef(
+        mainBranch(this.dependencies),
+        context.signal,
+      );
+      if (main.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_CHANGE_003",
+          message: "Main changed before permissions could be updated.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const branch = `cms-permissions/${this.dependencies.ids.suffix()}`;
+      const currentPermissions = await this.dependencies.git.readFile({
+        ref: mainBranch(this.dependencies),
+        path: ".cms/permissions.yaml",
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const customRoles =
+        input.customRoles ??
+        (currentPermissions === undefined
+          ? []
+          : parsePermissionConfiguration(yamlCodec.parse(currentPermissions.content)).customRoles);
+      const validated = parsePermissionConfiguration({
+        version: 1,
+        customRoles,
+        mappings: input.mappings,
+      });
+      const created = await this.dependencies.git.createBranch({
+        branch,
+        from: main.sha,
+        idempotencyKey: `${input.idempotencyKey}:branch`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const committed = await this.dependencies.git.commitFiles({
+        branch,
+        expectedSha: created.sha,
+        files: [
+          {
+            path: ".cms/permissions.yaml",
+            content: yamlCodec.serialize({
+              version: 1,
+              customRoles: validated.customRoles.map((role) => ({
+                name: String(role.name),
+                actions: [...role.actions].sort(),
+              })),
+              mappings: [...validated.mappings]
+                .map((mapping) => ({
+                  team: mapping.team,
+                  roles: [...mapping.roles].map(String).sort(),
+                }))
+                .sort((left, right) => left.team.localeCompare(right.team)),
+            }),
+          },
+        ],
+        message: "Update CMS team role mappings",
+        author: context.actor,
+        idempotencyKey: `${input.idempotencyKey}:commit`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const pullRequest = await this.dependencies.git.createPullRequest({
+        head: branch,
+        base: mainBranch(this.dependencies),
+        title: "Update CMS permissions",
+        body: "Update the audited GitHub team to CMS role mappings in `.cms/permissions.yaml`.",
+        idempotencyKey: `${input.idempotencyKey}:pr`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "team.role-mappings-updated",
+        branch,
+        { pullRequest: pullRequest.number, mappings: input.mappings.length },
+      );
+      return { pullRequest, revision: committed.sha };
+    });
+  }
+}
+
 export interface ContentSchedule {
   readonly id: string;
   readonly changeId: Change["id"];
-  readonly action: "publish" | "unpublish";
+  readonly action: ContentScheduleAction;
   readonly documentIds: readonly DocumentId[];
   readonly executeAt: string;
   readonly status: "scheduled" | "executed";
@@ -768,7 +1661,7 @@ export class ScheduleContentHandler {
   async execute(
     input: {
       readonly change: Change;
-      readonly action: "publish" | "unpublish";
+      readonly action: ContentScheduleAction;
       readonly documentIds: readonly DocumentId[];
       readonly executeAt: string;
       readonly expectedRevision: GitCommitSha;
@@ -861,7 +1754,14 @@ function contentSchedule(source: string): ContentSchedule | undefined {
   const schedule = value as Partial<ContentSchedule>;
   return typeof schedule.id === "string" &&
     typeof schedule.changeId === "string" &&
-    (schedule.action === "publish" || schedule.action === "unpublish") &&
+    [
+      "publish",
+      "unpublish",
+      "availability-start",
+      "availability-end",
+      "visibility-start",
+      "visibility-end",
+    ].includes(schedule.action ?? "") &&
     Array.isArray(schedule.documentIds) &&
     schedule.documentIds.every((id) => typeof id === "string") &&
     typeof schedule.executeAt === "string" &&
@@ -893,6 +1793,66 @@ async function applyScheduledUnpublishes(input: {
     expectedRevision: input.revision,
     actor: input.context.actor,
     idempotencyKey: `${input.idempotencyKey}:unpublish`,
+    ...(input.context.signal === undefined ? {} : { signal: input.context.signal }),
+  });
+}
+
+async function applyScheduledWindows(input: {
+  readonly dependencies: CommandDependencies;
+  readonly schedules: readonly ContentSchedule[];
+  readonly revision: GitCommitSha;
+  readonly idempotencyKey: string;
+  readonly context: RequestContext;
+}): Promise<GitCommitSha> {
+  const schedules = input.schedules
+    .filter(
+      (schedule) =>
+        schedule.action.startsWith("availability-") || schedule.action.startsWith("visibility-"),
+    )
+    .sort(
+      (left, right) =>
+        left.executeAt.localeCompare(right.executeAt) || left.id.localeCompare(right.id),
+    );
+  if (schedules.length === 0) return input.revision;
+  const branch = stagingBranch(input.dependencies);
+  const documentIds = [...new Set(schedules.flatMap((schedule) => schedule.documentIds))].sort();
+  const documents = await Promise.all(
+    documentIds.map((documentId) =>
+      input.dependencies.content.readDocument({
+        ref: branch,
+        documentId,
+        ...(input.context.signal === undefined ? {} : { signal: input.context.signal }),
+      }),
+    ),
+  );
+  const updated = documents.map((document) => {
+    const data =
+      typeof document.data === "object" && document.data !== null && !Array.isArray(document.data)
+        ? (document.data as Readonly<Record<string, unknown>>)
+        : {};
+    let next = data;
+    for (const schedule of schedules.filter((candidate) =>
+      candidate.documentIds.includes(document.id),
+    )) {
+      const field = schedule.action.startsWith("availability-")
+        ? "availability"
+        : "visibilitySchedule";
+      const current =
+        typeof next[field] === "object" && next[field] !== null && !Array.isArray(next[field])
+          ? (next[field] as Readonly<Record<string, unknown>>)
+          : {};
+      const boundary = schedule.action.endsWith("-start") ? "from" : "until";
+      next = { ...next, [field]: { ...current, [boundary]: schedule.executeAt } };
+    }
+    return { ...document, data: next };
+  });
+  return input.dependencies.content.writeDocuments({
+    ref: branch,
+    documents: updated,
+    expectedRevision: input.revision,
+    message: `Apply ${schedules.length} scheduled availability/visibility rule(s)`,
+    actor: input.context.actor,
+    idempotencyKey: `${input.idempotencyKey}:windows`,
     ...(input.context.signal === undefined ? {} : { signal: input.context.signal }),
   });
 }
@@ -956,10 +1916,17 @@ export class ExecuteScheduleHandler {
     }
     return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
       const staging = await this.dependencies.git.resolveRef(branch, context.signal);
-      const publicationRevision = await applyScheduledUnpublishes({
+      const unpublishRevision = await applyScheduledUnpublishes({
         dependencies: this.dependencies,
         schedules: [schedule],
         revision: staging.sha,
+        idempotencyKey: input.idempotencyKey,
+        context,
+      });
+      const publicationRevision = await applyScheduledWindows({
+        dependencies: this.dependencies,
+        schedules: [schedule],
+        revision: unpublishRevision,
         idempotencyKey: input.idempotencyKey,
         context,
       });
@@ -1053,10 +2020,17 @@ export class ExecuteDueSchedulesHandler {
         .map(({ schedule }) => schedule.id)
         .sort()
         .join(",");
-      const publicationRevision = await applyScheduledUnpublishes({
+      const unpublishRevision = await applyScheduledUnpublishes({
         dependencies: this.dependencies,
         schedules: due.map(({ schedule }) => schedule),
         revision: staging.sha,
+        idempotencyKey: `scheduled-batch:${batchKey}`,
+        context,
+      });
+      const publicationRevision = await applyScheduledWindows({
+        dependencies: this.dependencies,
+        schedules: due.map(({ schedule }) => schedule),
+        revision: unpublishRevision,
         idempotencyKey: `scheduled-batch:${batchKey}`,
         context,
       });
@@ -1142,12 +2116,32 @@ export class SubmitChangeHandler {
       }
       const pullRequest = await this.dependencies.git.createPullRequest({
         head: command.change.branchName,
-        base: stagingBranch(this.dependencies),
+        base:
+          command.change.emergency === true
+            ? mainBranch(this.dependencies)
+            : stagingBranch(this.dependencies),
         title: command.change.name,
         body: `${command.change.description ?? ""}\n\nChange-ID: ${command.change.id}`,
         idempotencyKey: command.idempotencyKey,
         ...(context.signal === undefined ? {} : { signal: context.signal }),
       });
+      if (
+        this.dependencies.review !== undefined &&
+        (command.change.collaborators?.length ?? 0) > 0
+      ) {
+        await this.dependencies.review.assignReviewers({
+          pullRequestNumber: pullRequest.number,
+          users:
+            command.change.collaborators
+              ?.filter((value) => !value.startsWith("team:"))
+              .map((value) => value.replace(/^@/u, "")) ?? [],
+          teams:
+            command.change.collaborators
+              ?.filter((value) => value.startsWith("team:"))
+              .map((value) => value.slice("team:".length)) ?? [],
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+      }
       const transitioned = await persistChange({
         dependencies: this.dependencies,
         change: command.change,
@@ -1275,6 +2269,119 @@ export class ReviewChangeHandler {
   }
 }
 
+export class ResolveReviewCommentHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly pullRequestNumber: number;
+      readonly commentId: string;
+      readonly resolved: boolean;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<ReviewComment> {
+    this.dependencies.authorization.assert(context.actor, "change.review");
+    const review = this.dependencies.review;
+    if (review === undefined) {
+      throw new CmsError({
+        code: "CMS_REVIEW_001",
+        message: "No review adapter is configured.",
+        category: "configuration",
+        retryable: false,
+      });
+    }
+    if (input.commentId.trim().length === 0) {
+      throw new CmsError({
+        code: "CMS_REVIEW_010",
+        message: "A review comment ID is required.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const comment = await review.resolveComment({
+        pullRequestNumber: input.pullRequestNumber,
+        commentId: input.commentId,
+        resolved: input.resolved,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        input.resolved ? "review.thread-resolved" : "review.thread-reopened",
+        input.change.id,
+        { commentId: input.commentId, pullRequest: input.pullRequestNumber },
+      );
+      return comment;
+    });
+  }
+}
+
+export class AssignReviewersHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly pullRequestNumber: number;
+      readonly users: readonly string[];
+      readonly teams: readonly string[];
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<ReviewAssignment> {
+    this.dependencies.authorization.assert(context.actor, "change.review");
+    const review = this.dependencies.review;
+    if (review === undefined) {
+      throw new CmsError({
+        code: "CMS_REVIEW_001",
+        message: "No review adapter is configured.",
+        category: "configuration",
+        retryable: false,
+      });
+    }
+    const username = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,98}[a-zA-Z0-9])?$/u;
+    const team = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/u;
+    if (
+      input.users.length + input.teams.length === 0 ||
+      input.users.length + input.teams.length > 30 ||
+      input.users.some((value) => !username.test(value)) ||
+      input.teams.some((value) => !team.test(value))
+    ) {
+      throw new CmsError({
+        code: "CMS_REVIEW_011",
+        message: "Assign one to thirty valid GitHub users or teams.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const assignment = await review.assignReviewers({
+        pullRequestNumber: input.pullRequestNumber,
+        users: [...new Set(input.users)].sort(),
+        teams: [...new Set(input.teams)].sort(),
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "review.reviewers-assigned",
+        input.change.id,
+        {
+          pullRequest: input.pullRequestNumber,
+          users: assignment.users,
+          teams: assignment.teams,
+        },
+      );
+      return assignment;
+    });
+  }
+}
+
 export class RequestChangesHandler {
   constructor(private readonly dependencies: CommandDependencies) {}
 
@@ -1380,6 +2487,789 @@ export class ArchiveChangeHandler {
   }
 }
 
+const STAGING_LOCK_PATH = ".cms/staging-lock.yaml";
+
+export interface StagingBatchLock {
+  readonly batchRevision: GitCommitSha;
+  readonly lockedBy: Actor["id"];
+  readonly lockedAt: string;
+  readonly checklist: readonly string[];
+}
+
+function parseStagingBatchLock(source: string | undefined): StagingBatchLock | undefined {
+  if (source === undefined) return undefined;
+  const value = yamlCodec.parse(source);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const lock = value as Partial<StagingBatchLock>;
+  return typeof lock.batchRevision === "string" &&
+    typeof lock.lockedBy === "string" &&
+    typeof lock.lockedAt === "string" &&
+    Array.isArray(lock.checklist) &&
+    lock.checklist.every((item) => typeof item === "string")
+    ? (lock as StagingBatchLock)
+    : undefined;
+}
+
+export class ReadStagingBatchHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(context: RequestContext): Promise<{
+    readonly revision: GitCommitSha;
+    readonly lock?: StagingBatchLock;
+  }> {
+    const branch = stagingBranch(this.dependencies);
+    const ref = await this.dependencies.git.resolveRef(branch, context.signal);
+    const file = await this.dependencies.git.readFile({
+      ref: branch,
+      path: STAGING_LOCK_PATH,
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+    });
+    const lock = parseStagingBatchLock(file?.content);
+    return { revision: ref.sha, ...(lock === undefined ? {} : { lock }) };
+  }
+}
+
+export class ReadAuditTimelineHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: { readonly resourceId: string; readonly limit?: number },
+    context: RequestContext,
+  ): Promise<readonly AuditEvent[]> {
+    if (input.resourceId.trim().length === 0) {
+      throw new CmsError({
+        code: "CMS_AUDIT_001",
+        message: "An audit resource is required.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return (
+      (await this.dependencies.auditQuery?.list({
+        resourceId: input.resourceId,
+        limit: Math.max(1, Math.min(200, input.limit ?? 100)),
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      })) ?? []
+    );
+  }
+}
+
+export class LockStagingBatchHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly expectedRevision: GitCommitSha;
+      readonly checklist: readonly string[];
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly lock: StagingBatchLock; readonly revision: GitCommitSha }> {
+    this.dependencies.authorization.assert(context.actor, "staging.publish");
+    if (
+      input.checklist.length === 0 ||
+      input.checklist.length > 50 ||
+      input.checklist.some((item) => item.trim().length === 0 || item.length > 200)
+    ) {
+      throw new CmsError({
+        code: "CMS_STAGING_010",
+        message: "Complete at least one valid release check before locking Staging.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const branch = stagingBranch(this.dependencies);
+      const current = await this.dependencies.git.resolveRef(branch, context.signal);
+      if (current.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_STAGING_011",
+          message: "Staging changed before the release candidate could be locked.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const existing = await this.dependencies.git.readFile({
+        ref: branch,
+        path: STAGING_LOCK_PATH,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      if (existing !== undefined) {
+        throw new CmsError({
+          code: "CMS_STAGING_012",
+          message: "Staging is already locked for release testing.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const lock: StagingBatchLock = {
+        batchRevision: current.sha,
+        lockedBy: context.actor.id,
+        lockedAt: isoTimestamp(this.dependencies.clock.now()),
+        checklist: [...new Set(input.checklist.map((item) => item.trim()))].sort(),
+      };
+      const committed = await this.dependencies.git.commitFiles({
+        branch,
+        expectedSha: current.sha,
+        files: [{ path: STAGING_LOCK_PATH, content: yamlCodec.serialize(lock) }],
+        message: "Lock Staging release candidate",
+        author: context.actor,
+        idempotencyKey: `${input.idempotencyKey}:lock`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "staging.locked",
+        committed.sha,
+        { batchRevision: lock.batchRevision, checklist: lock.checklist },
+      );
+      return { lock, revision: committed.sha };
+    });
+  }
+}
+
+export class UnlockStagingBatchHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly expectedRevision: GitCommitSha;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly revision: GitCommitSha }> {
+    this.dependencies.authorization.assert(context.actor, "staging.publish");
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const branch = stagingBranch(this.dependencies);
+      const current = await this.dependencies.git.resolveRef(branch, context.signal);
+      if (current.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_STAGING_011",
+          message: "Staging changed before the release candidate could be unlocked.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const existing = await this.dependencies.git.readFile({
+        ref: branch,
+        path: STAGING_LOCK_PATH,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      if (existing === undefined) return { revision: current.sha };
+      const committed = await this.dependencies.git.commitFiles({
+        branch,
+        expectedSha: current.sha,
+        files: [{ path: STAGING_LOCK_PATH, content: null }],
+        message: "Unlock Staging release candidate",
+        author: context.actor,
+        idempotencyKey: `${input.idempotencyKey}:unlock`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "staging.unlocked",
+        committed.sha,
+      );
+      return { revision: committed.sha };
+    });
+  }
+}
+
+export class RemoveChangeFromStagingHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly expectedRevision: GitCommitSha;
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{
+    readonly change: Change;
+    readonly revision: GitCommitSha;
+    readonly pullRequest: PullRequest;
+  }> {
+    this.dependencies.authorization.assert(context.actor, "staging.publish");
+    if (input.change.status !== "staging" || input.change.pullRequestNumber === undefined) {
+      throw new CmsError({
+        code: "CMS_STAGING_014",
+        message: "Only a staged Change with a completed review can be removed.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    const originalPullRequestNumber = input.change.pullRequestNumber;
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const branch = stagingBranch(this.dependencies);
+      const [current, lock] = await Promise.all([
+        this.dependencies.git.resolveRef(branch, context.signal),
+        this.dependencies.git.readFile({
+          ref: branch,
+          path: STAGING_LOCK_PATH,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        }),
+      ]);
+      if (lock !== undefined) {
+        throw new CmsError({
+          code: "CMS_STAGING_013",
+          message: "Unlock the tested release candidate before removing a Change.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      if (current.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_STAGING_011",
+          message: "Staging changed before the selected Change could be removed.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const pullRequest = await this.dependencies.git.createRevertPullRequest({
+        pullRequestNumber: originalPullRequestNumber,
+        title: `Remove ${input.change.name} from Staging`,
+        body: [
+          `Revert Change ${input.change.id} before the next Production release.`,
+          "",
+          `Change-ID: ${input.change.id}`,
+        ].join("\n"),
+        idempotencyKey: `${input.idempotencyKey}:revert-pr`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const revertHead = await this.dependencies.git.resolveRef(pullRequest.head, context.signal);
+      const reverted = await this.dependencies.git.mergePullRequest({
+        number: pullRequest.number,
+        strategy: "merge",
+        expectedHeadSha: revertHead.sha,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const change: Change = {
+        ...input.change,
+        status: "archived",
+        updatedAt: isoTimestamp(this.dependencies.clock.now()),
+      };
+      const recorded = await this.dependencies.git.commitFiles({
+        branch,
+        expectedSha: reverted.sha,
+        files: [
+          {
+            path: `.cms/changes/${change.id}.yaml`,
+            content: yamlCodec.serialize(change),
+          },
+        ],
+        message: `Record removal of ${change.name} from Staging\n\nChange-ID: ${change.id}`,
+        author: context.actor,
+        idempotencyKey: `${input.idempotencyKey}:status`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "change.removed-from-staging",
+        change.id,
+        { pullRequestNumber: pullRequest.number, revision: recorded.sha },
+      );
+      return { change, revision: recorded.sha, pullRequest };
+    });
+  }
+}
+
+interface ChangeDocumentMerge {
+  readonly documentId: DocumentId;
+  readonly base?: ContentDocument;
+  readonly change?: ContentDocument;
+  readonly staging?: ContentDocument;
+  readonly candidate?: ContentDocument;
+  readonly conflicts: readonly ChangeConflict[];
+}
+
+function sameDocument(
+  left: ContentDocument | undefined,
+  right: ContentDocument | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.type === right.type &&
+    left.schemaVersion === right.schemaVersion &&
+    canonicalJson(left.data) === canonicalJson(right.data)
+  );
+}
+
+async function readOptionalDocument(input: {
+  readonly dependencies: CommandDependencies;
+  readonly ref: string;
+  readonly documentId: DocumentId;
+  readonly signal?: AbortSignal;
+}): Promise<ContentDocument | undefined> {
+  return input.dependencies.content
+    .readDocument({
+      ref: input.ref,
+      documentId: input.documentId,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    })
+    .catch(() => undefined);
+}
+
+async function listAllDocumentIds(input: {
+  readonly dependencies: CommandDependencies;
+  readonly refs: readonly string[];
+  readonly signal?: AbortSignal;
+}): Promise<readonly DocumentId[]> {
+  const ids = new Set<DocumentId>();
+  for (const ref of input.refs) {
+    let cursor: string | undefined;
+    do {
+      const page = await input.dependencies.content.listDocuments({
+        ref,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      for (const document of page.items) ids.add(document.id);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+  }
+  return [...ids].sort();
+}
+
+function documentConflict(input: {
+  readonly documentId: DocumentId;
+  readonly base?: ContentDocument;
+  readonly change?: ContentDocument;
+  readonly staging?: ContentDocument;
+}): ChangeConflict {
+  return {
+    documentId: input.documentId,
+    path: "" as ContentPath,
+    base: input.base?.data,
+    change: input.change?.data,
+    staging: input.staging?.data,
+    scope: "document",
+  };
+}
+
+function mergeDocumentVersions(input: {
+  readonly documentId: DocumentId;
+  readonly base?: ContentDocument;
+  readonly change?: ContentDocument;
+  readonly staging?: ContentDocument;
+}): ChangeDocumentMerge {
+  const { documentId, base, change, staging } = input;
+  if (base === undefined) {
+    if (change === undefined) {
+      return {
+        documentId,
+        ...(staging === undefined ? {} : { staging, candidate: staging }),
+        conflicts: [],
+      };
+    }
+    if (staging === undefined || sameDocument(change, staging)) {
+      return {
+        documentId,
+        change,
+        ...(staging === undefined ? {} : { staging }),
+        candidate: change,
+        conflicts: [],
+      };
+    }
+    return {
+      documentId,
+      change,
+      staging,
+      candidate: change,
+      conflicts: [documentConflict({ documentId, change, staging })],
+    };
+  }
+
+  if (change === undefined) {
+    if (staging === undefined) {
+      return { documentId, base, conflicts: [] };
+    }
+    if (sameDocument(base, staging)) {
+      return { documentId, base, staging, conflicts: [] };
+    }
+    return {
+      documentId,
+      base,
+      staging,
+      conflicts: [documentConflict({ documentId, base, staging })],
+    };
+  }
+  if (staging === undefined) {
+    if (sameDocument(base, change)) {
+      return { documentId, base, change, conflicts: [] };
+    }
+    return {
+      documentId,
+      base,
+      change,
+      candidate: change,
+      conflicts: [documentConflict({ documentId, base, change })],
+    };
+  }
+
+  const changeMetadataChanged =
+    change.type !== base.type || change.schemaVersion !== base.schemaVersion;
+  const stagingMetadataChanged =
+    staging.type !== base.type || staging.schemaVersion !== base.schemaVersion;
+  if (
+    changeMetadataChanged &&
+    stagingMetadataChanged &&
+    (change.type !== staging.type || change.schemaVersion !== staging.schemaVersion)
+  ) {
+    return {
+      documentId,
+      base,
+      change,
+      staging,
+      candidate: change,
+      conflicts: [documentConflict({ documentId, base, change, staging })],
+    };
+  }
+
+  const merged = mergeDocuments(base.data, change.data, staging.data);
+  const metadataSource = stagingMetadataChanged ? staging : change;
+  return {
+    documentId,
+    base,
+    change,
+    staging,
+    candidate: {
+      ...metadataSource,
+      id: documentId,
+      revision: change.revision,
+      data: merged.document,
+    },
+    conflicts: merged.conflicts.map((conflict) => ({
+      documentId,
+      path: conflict.path,
+      base: conflict.base,
+      change: conflict.ours,
+      staging: conflict.theirs,
+      scope: "field",
+    })),
+  };
+}
+
+async function inspectChangeConflicts(input: {
+  readonly dependencies: CommandDependencies;
+  readonly change: Change;
+  readonly signal?: AbortSignal;
+}): Promise<{
+  readonly stagingRevision: GitCommitSha;
+  readonly documents: readonly ChangeDocumentMerge[];
+}> {
+  const stagingRef = await input.dependencies.git.resolveRef(
+    stagingBranch(input.dependencies),
+    input.signal,
+  );
+  const ids = await listAllDocumentIds({
+    dependencies: input.dependencies,
+    refs: [input.change.baseCommit, input.change.branchName, stagingBranch(input.dependencies)],
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  });
+  const documents = await Promise.all(
+    ids.map(async (documentId) => {
+      const [base, change, staging] = await Promise.all([
+        readOptionalDocument({
+          dependencies: input.dependencies,
+          ref: input.change.baseCommit,
+          documentId,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        }),
+        readOptionalDocument({
+          dependencies: input.dependencies,
+          ref: input.change.branchName,
+          documentId,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        }),
+        readOptionalDocument({
+          dependencies: input.dependencies,
+          ref: stagingBranch(input.dependencies),
+          documentId,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        }),
+      ]);
+      return mergeDocumentVersions({
+        documentId,
+        ...(base === undefined ? {} : { base }),
+        ...(change === undefined ? {} : { change }),
+        ...(staging === undefined ? {} : { staging }),
+      });
+    }),
+  );
+  return { stagingRevision: stagingRef.sha, documents };
+}
+
+function valueAtPath(
+  value: unknown,
+  path: ContentPath,
+): { readonly exists: boolean; readonly value: unknown } {
+  let current = value;
+  for (const segment of parseContentPath(path)) {
+    if (typeof current !== "object" || current === null) {
+      return { exists: false, value: undefined };
+    }
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/u.test(segment)) return { exists: false, value: undefined };
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index >= current.length) {
+        return { exists: false, value: undefined };
+      }
+      current = current[index];
+      continue;
+    }
+    if (!Object.hasOwn(current, segment)) return { exists: false, value: undefined };
+    current = (current as Readonly<Record<string, unknown>>)[segment];
+  }
+  return { exists: true, value: current };
+}
+
+export class ReadChangeConflictsHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: { readonly change: Change },
+    context: RequestContext,
+  ): Promise<{
+    readonly conflicts: readonly ChangeConflict[];
+    readonly stagingRevision: GitCommitSha;
+  }> {
+    this.dependencies.authorization.assert(context.actor, "project.read");
+    const inspected = await inspectChangeConflicts({
+      dependencies: this.dependencies,
+      change: input.change,
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+    });
+    return {
+      conflicts: inspected.documents.flatMap((document) => document.conflicts),
+      stagingRevision: inspected.stagingRevision,
+    };
+  }
+}
+
+export class ResolveChangeConflictsHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly change: Change;
+      readonly expectedRevision: GitCommitSha;
+      readonly resolutions: readonly ChangeConflictResolution[];
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<{ readonly change: Change; readonly revision: GitCommitSha }> {
+    this.dependencies.authorization.assert(context.actor, "change.edit", {
+      ownerId: input.change.ownerId,
+      policy: { ownerOnly: ["change.edit"] },
+    });
+    if (!["draft", "changes_requested", "in_review", "approved"].includes(input.change.status)) {
+      throw new CmsError({
+        code: "CMS_CHANGE_016",
+        message: "Conflicts can only be resolved before a Change enters Staging.",
+        category: "conflict",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const branch = await this.dependencies.git.resolveRef(
+        input.change.branchName,
+        context.signal,
+      );
+      if (branch.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_CHANGE_003",
+          message: "The Change moved before its conflicts could be resolved.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const inspected = await inspectChangeConflicts({
+        dependencies: this.dependencies,
+        change: input.change,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const allConflicts = inspected.documents.flatMap((document) => document.conflicts);
+      if (allConflicts.length === 0) {
+        throw new CmsError({
+          code: "CMS_CHANGE_017",
+          message: "This Change has no semantic conflicts with Staging.",
+          category: "validation",
+          retryable: false,
+        });
+      }
+      const resolutions = input.resolutions.map((resolution) => {
+        if (resolution.choice !== "change" && resolution.choice !== "staging") {
+          throw new CmsError({
+            code: "CMS_CHANGE_018",
+            message: "A conflict resolution must choose this Change or Staging.",
+            category: "validation",
+            retryable: false,
+          });
+        }
+        return { ...resolution, path: contentPath(resolution.path) };
+      });
+      const knownConflicts = new Set(
+        allConflicts.map((conflict) => `${conflict.documentId}:${conflict.path}`),
+      );
+      const choices = new Map<string, ChangeConflictResolution["choice"]>();
+      for (const resolution of resolutions) {
+        const key = `${resolution.documentId}:${resolution.path}`;
+        if (choices.has(key) || !knownConflicts.has(key)) {
+          throw new CmsError({
+            code: "CMS_CHANGE_018",
+            message: `Conflict ${key} is unknown or has more than one resolution.`,
+            category: "validation",
+            retryable: false,
+          });
+        }
+        choices.set(key, resolution.choice);
+      }
+      const unresolved = allConflicts.filter(
+        (conflict) => !choices.has(`${conflict.documentId}:${conflict.path}`),
+      );
+      if (unresolved.length > 0) {
+        throw new CmsError({
+          code: "CMS_CHANGE_019",
+          message: "Choose a value for every semantic conflict before continuing.",
+          category: "validation",
+          retryable: false,
+          context: {
+            paths: unresolved.map((conflict) => `${conflict.documentId}${conflict.path}`),
+          },
+        });
+      }
+
+      const finalDocuments = new Map<DocumentId, ContentDocument | undefined>();
+      for (const merged of inspected.documents) {
+        let candidate = merged.candidate;
+        const wholeDocumentConflict = merged.conflicts.find(
+          (conflict) => conflict.scope === "document",
+        );
+        if (wholeDocumentConflict !== undefined) {
+          candidate =
+            choices.get(`${merged.documentId}:${wholeDocumentConflict.path}`) === "staging"
+              ? merged.staging
+              : merged.change;
+        } else if (candidate !== undefined) {
+          let data = candidate.data;
+          for (const conflict of merged.conflicts) {
+            if (choices.get(`${merged.documentId}:${conflict.path}`) !== "staging") continue;
+            const stagingValue = valueAtPath(merged.staging?.data, conflict.path);
+            data = applyPatch(
+              data,
+              stagingValue.exists
+                ? {
+                    op: "set",
+                    path: conflict.path,
+                    value: stagingValue.value,
+                    metadata: {
+                      id: `resolve-${merged.documentId}-${conflict.path}`,
+                      actorId: context.actor.id,
+                      createdAt: this.dependencies.clock.now().toISOString(),
+                      source: "editor",
+                    },
+                  }
+                : {
+                    op: "unset",
+                    path: conflict.path,
+                    metadata: {
+                      id: `resolve-${merged.documentId}-${conflict.path}`,
+                      actorId: context.actor.id,
+                      createdAt: this.dependencies.clock.now().toISOString(),
+                      source: "editor",
+                    },
+                  },
+            );
+          }
+          candidate = { ...candidate, data };
+        }
+        finalDocuments.set(merged.documentId, candidate);
+      }
+
+      let contentRevision = branch.sha;
+      const writes = inspected.documents.flatMap((merged) => {
+        const candidate = finalDocuments.get(merged.documentId);
+        return candidate !== undefined && !sameDocument(candidate, merged.change)
+          ? [{ ...candidate, revision: contentRevision }]
+          : [];
+      });
+      if (writes.length > 0) {
+        contentRevision = await this.dependencies.content.writeDocuments({
+          ref: input.change.branchName,
+          documents: writes,
+          expectedRevision: contentRevision,
+          message: `Resolve ${String(allConflicts.length)} conflict(s) with Staging`,
+          actor: context.actor,
+          idempotencyKey: `${input.idempotencyKey}:documents`,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+      }
+      const deletions = inspected.documents
+        .filter(
+          (merged) =>
+            merged.change !== undefined && finalDocuments.get(merged.documentId) === undefined,
+        )
+        .map((merged) => merged.documentId);
+      if (deletions.length > 0) {
+        contentRevision = await this.dependencies.content.deleteDocuments({
+          ref: input.change.branchName,
+          documentIds: deletions,
+          expectedRevision: contentRevision,
+          actor: context.actor,
+          idempotencyKey: `${input.idempotencyKey}:deletions`,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+      }
+
+      const current = await this.dependencies.git.resolveRef(
+        input.change.branchName,
+        context.signal,
+      );
+      const change: Change = {
+        ...input.change,
+        baseBranch: stagingBranch(this.dependencies),
+        baseCommit: inspected.stagingRevision,
+        status: input.change.status === "approved" ? "in_review" : input.change.status,
+        updatedAt: isoTimestamp(this.dependencies.clock.now()),
+      };
+      const committed = await this.dependencies.git.commitFiles({
+        branch: input.change.branchName,
+        expectedSha: current.sha,
+        files: [{ path: ".cms/change.yaml", content: yamlCodec.serialize(change) }],
+        message: changeCommitMessage(change, "Resolve semantic conflicts with Staging"),
+        author: context.actor,
+        idempotencyKey: `${input.idempotencyKey}:metadata`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "change.conflicts-resolved",
+        change.id,
+        {
+          revision: committed.sha,
+          stagingRevision: inspected.stagingRevision,
+          resolutions: resolutions.map((resolution) => ({
+            documentId: resolution.documentId,
+            path: resolution.path,
+            choice: resolution.choice,
+          })),
+          approvalReset: input.change.status === "approved",
+        },
+      );
+      return { change, revision: committed.sha };
+    });
+  }
+}
+
 export class AddChangeToStagingHandler {
   constructor(private readonly dependencies: CommandDependencies) {}
 
@@ -1394,40 +3284,27 @@ export class AddChangeToStagingHandler {
   ): Promise<ChangeTransitionResult> {
     this.dependencies.authorization.assert(context.actor, "staging.add");
     return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
-      const changedDocuments = await this.dependencies.content.listDocuments({
-        ref: input.change.branchName,
+      const lock = await this.dependencies.git.readFile({
+        ref: stagingBranch(this.dependencies),
+        path: STAGING_LOCK_PATH,
         ...(context.signal === undefined ? {} : { signal: context.signal }),
       });
-      const conflicts: string[] = [];
-      for (const summary of changedDocuments.items) {
-        const [base, ours, theirs] = await Promise.all([
-          this.dependencies.content
-            .readDocument({
-              ref: input.change.baseCommit,
-              documentId: summary.id,
-              ...(context.signal === undefined ? {} : { signal: context.signal }),
-            })
-            .catch(() => undefined),
-          this.dependencies.content.readDocument({
-            ref: input.change.branchName,
-            documentId: summary.id,
-            ...(context.signal === undefined ? {} : { signal: context.signal }),
-          }),
-          this.dependencies.content
-            .readDocument({
-              ref: stagingBranch(this.dependencies),
-              documentId: summary.id,
-              ...(context.signal === undefined ? {} : { signal: context.signal }),
-            })
-            .catch(() => undefined),
-        ]);
-        if (base === undefined || theirs === undefined) continue;
-        conflicts.push(
-          ...mergeDocuments(base.data, ours.data, theirs.data).conflicts.map(
-            (conflict) => `${summary.id}${conflict.path}`,
-          ),
-        );
+      if (lock !== undefined) {
+        throw new CmsError({
+          code: "CMS_STAGING_013",
+          message: "Staging is locked while the current release candidate is being tested.",
+          category: "conflict",
+          retryable: true,
+        });
       }
+      const inspected = await inspectChangeConflicts({
+        dependencies: this.dependencies,
+        change: input.change,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const conflicts = inspected.documents.flatMap((document) =>
+        document.conflicts.map((conflict) => `${conflict.documentId}${conflict.path}`),
+      );
       if (conflicts.length > 0) {
         throw new CmsError({
           code: "CMS_CHANGE_009",
@@ -1530,14 +3407,17 @@ async function markStagedChangesPublished(input: {
   const committed = await input.dependencies.git.commitFiles({
     branch,
     expectedSha: input.revision,
-    files: changes.map(({ path, change }) => ({
-      path,
-      content: yamlCodec.serialize({
-        ...change,
-        status: "published",
-        updatedAt: isoTimestamp(input.dependencies.clock.now()),
-      } satisfies Change),
-    })),
+    files: [
+      ...changes.map(({ path, change }) => ({
+        path,
+        content: yamlCodec.serialize({
+          ...change,
+          status: "published",
+          updatedAt: isoTimestamp(input.dependencies.clock.now()),
+        } satisfies Change),
+      })),
+      { path: STAGING_LOCK_PATH, content: null },
+    ],
     message: `Prepare ${changes.length} Change(s) for publication`,
     author: input.context.actor,
     idempotencyKey: `${input.idempotencyKey}:published-status`,
@@ -2001,6 +3881,148 @@ export class PublishStagingHandler {
   }
 }
 
+export interface PublishEmergencyChangeCommand {
+  readonly change: Change;
+  readonly pullRequestNumber: number;
+  readonly expectedRevision: GitCommitSha;
+  readonly configVersion: number;
+  readonly registryDigest: string;
+  readonly schemaVersion: number;
+  readonly expectedPointerRevision?: string;
+  readonly idempotencyKey: string;
+}
+
+export class PublishEmergencyChangeHandler {
+  private readonly buildAndPublish: BuildAndPublishReleaseHandler;
+
+  constructor(private readonly dependencies: CommandDependencies) {
+    this.buildAndPublish = new BuildAndPublishReleaseHandler(dependencies);
+  }
+
+  async execute(
+    input: PublishEmergencyChangeCommand,
+    context: RequestContext,
+  ): Promise<{
+    readonly change: Change;
+    readonly revision: GitCommitSha;
+    readonly stagingRevision: GitCommitSha;
+    readonly release: StoredRelease;
+  }> {
+    this.dependencies.authorization.assert(context.actor, "staging.publish");
+    if (input.change.emergency !== true || input.change.status !== "approved") {
+      throw new CmsError({
+        code: "CMS_CHANGE_012",
+        message: "Only an approved Emergency Change can use the direct Production path.",
+        category: "conflict",
+        retryable: false,
+      });
+    }
+    return once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      const head = await this.dependencies.git.resolveRef(input.change.branchName, context.signal);
+      if (head.sha !== input.expectedRevision) {
+        throw new CmsError({
+          code: "CMS_CHANGE_003",
+          message: "The Emergency Change moved while publication was being prepared.",
+          category: "conflict",
+          retryable: true,
+        });
+      }
+      const checks = await this.dependencies.review?.listChecks(head.sha, context.signal);
+      const blocking =
+        checks?.filter(
+          (check) =>
+            check.required && (check.status !== "completed" || check.conclusion !== "success"),
+        ) ?? [];
+      if (blocking.length > 0) {
+        throw new CmsError({
+          code: "CMS_REVIEW_008",
+          message: "Required checks must pass before an Emergency Change can be published.",
+          category: "conflict",
+          retryable: true,
+          context: { checks: blocking.map((check) => check.name) },
+        });
+      }
+      const merged = await this.dependencies.git.mergePullRequest({
+        number: input.pullRequestNumber,
+        strategy: "squash",
+        expectedHeadSha: head.sha,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const change: Change = {
+        ...input.change,
+        status: "published",
+        updatedAt: isoTimestamp(this.dependencies.clock.now()),
+      };
+      const recorded = await this.dependencies.git.commitFiles({
+        branch: mainBranch(this.dependencies),
+        expectedSha: merged.sha,
+        files: [
+          {
+            path: `.cms/changes/${change.id}.yaml`,
+            content: yamlCodec.serialize(change),
+          },
+        ],
+        message: changeCommitMessage(change, `Record Emergency Change "${change.name}"`),
+        author: context.actor,
+        idempotencyKey: `${input.idempotencyKey}:status`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const release = await this.buildAndPublish.execute(
+        {
+          ref: mainBranch(this.dependencies),
+          expectedRevision: recorded.sha,
+          environment: "production",
+          configVersion: input.configVersion,
+          registryDigest: input.registryDigest,
+          schemaVersion: input.schemaVersion,
+          ...(input.expectedPointerRevision === undefined
+            ? {}
+            : { expectedPointerRevision: input.expectedPointerRevision }),
+          idempotencyKey: `${input.idempotencyKey}:release`,
+        },
+        context,
+      );
+      const syncPullRequest = await this.dependencies.git.createPullRequest({
+        head: mainBranch(this.dependencies),
+        base: stagingBranch(this.dependencies),
+        title: `Forward-sync Emergency Change: ${change.name}`,
+        body: `Synchronize Emergency Change ${change.id} from Production into Staging.\n\nMain-Revision: ${recorded.sha}`,
+        idempotencyKey: `${input.idempotencyKey}:sync-pr`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const synchronized = await this.dependencies.git.mergePullRequest({
+        number: syncPullRequest.number,
+        strategy: "merge",
+        expectedHeadSha: recorded.sha,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await this.dependencies.git.deleteBranch({
+        branch: input.change.branchName,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "change.emergency-published",
+        change.id,
+        {
+          releaseId: release.id,
+          mainRevision: recorded.sha,
+          stagingRevision: synchronized.sha,
+          syncPullRequest: syncPullRequest.number,
+        },
+      );
+      return {
+        change,
+        revision: recorded.sha,
+        stagingRevision: synchronized.sha,
+        release,
+      };
+    });
+  }
+}
+
 export class PublishReleaseHandler {
   constructor(private readonly dependencies: CommandDependencies) {}
 
@@ -2070,6 +4092,99 @@ export class PublishReleaseHandler {
   }
 }
 
+export class RevalidateReleaseHandler {
+  constructor(private readonly dependencies: CommandDependencies) {}
+
+  async execute(
+    input: {
+      readonly releaseId: ReleaseId;
+      readonly environment: "preview" | "staging" | "production";
+      readonly idempotencyKey: string;
+    },
+    context: RequestContext,
+  ): Promise<void> {
+    this.dependencies.authorization.assert(context.actor, "staging.publish");
+    const store = this.dependencies.releaseStore;
+    if (store === undefined) {
+      throw new CmsError({
+        code: "CMS_STORAGE_001",
+        message: "No release store is configured.",
+        category: "configuration",
+        retryable: false,
+      });
+    }
+    const release = await store.readRelease(input.releaseId, context.signal);
+    if (release === undefined) {
+      throw new CmsError({
+        code: "CMS_PUBLISH_008",
+        message: "The selected release does not exist.",
+        category: "validation",
+        retryable: false,
+      });
+    }
+    await once(this.dependencies.idempotency, input.idempotencyKey, async () => {
+      if (this.dependencies.publicationNotifier === undefined) {
+        throw new CmsError({
+          code: "CMS_INTEGRATION_001",
+          message: "No publication revalidation adapter is configured.",
+          category: "configuration",
+          retryable: false,
+        });
+      }
+      await notifyPublication({
+        notifier: this.dependencies.publicationNotifier,
+        release,
+        environment: input.environment,
+        idempotencyKey: input.idempotencyKey,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      await audit(
+        this.dependencies.audit,
+        this.dependencies.clock,
+        context,
+        "release.revalidated",
+        release.id,
+        { environment: input.environment },
+      );
+    });
+  }
+}
+
+function rollbackRepositoryFiles(release: StoredRelease): readonly {
+  readonly path: string;
+  readonly content: string;
+}[] {
+  const files: { path: string; content: string }[] = [];
+  for (const [path, source] of Object.entries(release.files)) {
+    if (!path.startsWith("content/") || !path.endsWith(".json")) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(source);
+    } catch {
+      continue;
+    }
+    const record = recordValue(value);
+    if (
+      typeof record.id !== "string" ||
+      typeof record.type !== "string" ||
+      typeof record.schemaVersion !== "number"
+    ) {
+      continue;
+    }
+    files.push({
+      path: `${path.slice(0, -".json".length)}.yaml`,
+      content: yamlCodec.serialize(record),
+    });
+  }
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export interface RollbackReleaseResult {
+  readonly pullRequest: PullRequest;
+  readonly stagingPullRequest: PullRequest;
+  readonly revision: GitCommitSha;
+}
+
 export class RollbackReleaseHandler {
   constructor(private readonly dependencies: CommandDependencies) {}
 
@@ -2080,7 +4195,7 @@ export class RollbackReleaseHandler {
       readonly idempotencyKey: string;
     },
     context: RequestContext,
-  ): Promise<PullRequest> {
+  ): Promise<RollbackReleaseResult> {
     this.dependencies.authorization.assert(context.actor, "release.rollback");
     const store = this.dependencies.releaseStore;
     if (store === undefined) {
@@ -2128,21 +4243,34 @@ export class RollbackReleaseHandler {
         idempotencyKey: `${input.idempotencyKey}:branch`,
         ...(context.signal === undefined ? {} : { signal: context.signal }),
       });
+      const currentContent = await this.dependencies.git.listFiles({
+        ref: mainBranch(this.dependencies),
+        prefix: "content/",
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const targetContent = rollbackRepositoryFiles(release);
+      const targetPaths = new Set(targetContent.map((file) => file.path));
       const committed = await this.dependencies.git.commitFiles({
         branch,
         expectedSha: created.sha,
         files: [
+          ...currentContent
+            .filter((file) => !targetPaths.has(file.path))
+            .map((file) => ({ path: file.path, content: null })),
+          ...targetContent,
           {
             path: ".cms/rollback.yaml",
             content: yamlCodec.serialize({
               releaseId: input.releaseId,
+              releaseRevision: releaseManifestDetails(release).revision,
               previousPointerRevision: input.expectedPointerRevision,
               requestedBy: context.actor.login,
               requestedAt: this.dependencies.clock.now().toISOString(),
+              restoredDocuments: targetContent.length,
             }),
           },
         ],
-        message: `Record rollback to ${input.releaseId}`,
+        message: `Reconcile repository with rollback ${input.releaseId}`,
         author: context.actor,
         idempotencyKey: `${input.idempotencyKey}:commit`,
         ...(context.signal === undefined ? {} : { signal: context.signal }),
@@ -2150,9 +4278,24 @@ export class RollbackReleaseHandler {
       const pullRequest = await this.dependencies.git.createPullRequest({
         head: branch,
         base: mainBranch(this.dependencies),
-        title: `Audit rollback to ${input.releaseId}`,
-        body: `Production was atomically restored to ${input.releaseId} before this audit PR was opened.`,
+        title: `Reconcile Production with rollback ${input.releaseId}`,
+        body: `Production was atomically restored to ${input.releaseId} before this repository reconciliation PR was opened.\n\nThe content tree is restored from the immutable release and remains fully auditable.`,
         idempotencyKey: `${input.idempotencyKey}:pr`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const stagingBranchName = `rollback-staging/${input.releaseId}-${this.dependencies.ids.suffix()}`;
+      await this.dependencies.git.createBranch({
+        branch: stagingBranchName,
+        from: committed.sha,
+        idempotencyKey: `${input.idempotencyKey}:staging-branch`,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      const stagingPullRequest = await this.dependencies.git.createPullRequest({
+        head: stagingBranchName,
+        base: stagingBranch(this.dependencies),
+        title: `Synchronize Staging after rollback ${input.releaseId}`,
+        body: `Apply the same repository reconciliation as Production so the next release cannot accidentally reintroduce reverted content.`,
+        idempotencyKey: `${input.idempotencyKey}:staging-pr`,
         ...(context.signal === undefined ? {} : { signal: context.signal }),
       });
       await audit(
@@ -2161,15 +4304,24 @@ export class RollbackReleaseHandler {
         context,
         "release.rolled-back",
         input.releaseId,
-        { pointerFirst: true, auditPullRequest: pullRequest.number, revision: committed.sha },
+        {
+          pointerFirst: true,
+          reconciliationPullRequest: pullRequest.number,
+          stagingPullRequest: stagingPullRequest.number,
+          revision: committed.sha,
+          restoredDocuments: targetContent.length,
+        },
       );
-      return pullRequest;
+      return { pullRequest, stagingPullRequest, revision: committed.sha };
     });
   }
 }
 
 export interface CmsApplication {
   readonly createChange: CreateChangeHandler;
+  readonly updateChange: UpdateChangeHandler;
+  readonly deleteChange: DeleteChangeHandler;
+  readonly commitChange: CommitChangeHandler;
   readonly createDocument: CreateDocumentHandler;
   readonly updateDocument: UpdateDocumentHandler;
   readonly deleteDocument: DeleteDocumentHandler;
@@ -2177,27 +4329,50 @@ export interface CmsApplication {
   readonly createTranslationJob: CreateTranslationJobHandler;
   readonly readTranslationJob: ReadTranslationJobHandler;
   readonly createAssetUpload: CreateAssetUploadHandler;
+  readonly receiveAssetUpload: ReceiveAssetUploadHandler;
   readonly finalizeAssetUpload: FinalizeAssetUploadHandler;
+  readonly updateAsset: UpdateAssetHandler;
   readonly deleteAsset: DeleteAssetHandler;
+  readonly createPreviewSession: CreatePreviewSessionHandler;
+  readonly readPreviewSession: ReadPreviewSessionHandler;
+  readonly refreshPreviewSession: RefreshPreviewSessionHandler;
+  readonly readTeamDirectory: ReadTeamDirectoryHandler;
+  readonly inviteTeamMember: InviteTeamMemberHandler;
+  readonly addTeamMember: AddTeamMemberHandler;
+  readonly updateTeamRoleMappings: UpdateTeamRoleMappingsHandler;
   readonly scheduleContent: ScheduleContentHandler;
   readonly executeSchedule: ExecuteScheduleHandler;
   readonly executeDueSchedules: ExecuteDueSchedulesHandler;
   readonly submitChange: SubmitChangeHandler;
   readonly reviewChange: ReviewChangeHandler;
+  readonly resolveReviewComment: ResolveReviewCommentHandler;
+  readonly assignReviewers: AssignReviewersHandler;
   readonly requestChanges: RequestChangesHandler;
   readonly archiveChange: ArchiveChangeHandler;
+  readonly readStagingBatch: ReadStagingBatchHandler;
+  readonly readAuditTimeline: ReadAuditTimelineHandler;
+  readonly lockStagingBatch: LockStagingBatchHandler;
+  readonly unlockStagingBatch: UnlockStagingBatchHandler;
+  readonly removeChangeFromStaging: RemoveChangeFromStagingHandler;
   readonly approveChange: ApproveChangeHandler;
+  readonly readChangeConflicts: ReadChangeConflictsHandler;
+  readonly resolveChangeConflicts: ResolveChangeConflictsHandler;
   readonly addChangeToStaging: AddChangeToStagingHandler;
   readonly promoteStaging: PromoteStagingHandler;
   readonly buildAndPublishRelease: BuildAndPublishReleaseHandler;
   readonly publishStaging: PublishStagingHandler;
+  readonly publishEmergencyChange: PublishEmergencyChangeHandler;
   readonly publishRelease: PublishReleaseHandler;
+  readonly revalidateRelease: RevalidateReleaseHandler;
   readonly rollbackRelease: RollbackReleaseHandler;
 }
 
 export function createCmsApplication(dependencies: CommandDependencies): CmsApplication {
   return {
     createChange: new CreateChangeHandler(dependencies),
+    updateChange: new UpdateChangeHandler(dependencies),
+    deleteChange: new DeleteChangeHandler(dependencies),
+    commitChange: new CommitChangeHandler(dependencies),
     createDocument: new CreateDocumentHandler(dependencies),
     updateDocument: new UpdateDocumentHandler(dependencies),
     deleteDocument: new DeleteDocumentHandler(dependencies),
@@ -2205,21 +4380,41 @@ export function createCmsApplication(dependencies: CommandDependencies): CmsAppl
     createTranslationJob: new CreateTranslationJobHandler(dependencies),
     readTranslationJob: new ReadTranslationJobHandler(dependencies),
     createAssetUpload: new CreateAssetUploadHandler(dependencies),
+    receiveAssetUpload: new ReceiveAssetUploadHandler(dependencies),
     finalizeAssetUpload: new FinalizeAssetUploadHandler(dependencies),
+    updateAsset: new UpdateAssetHandler(dependencies),
     deleteAsset: new DeleteAssetHandler(dependencies),
+    createPreviewSession: new CreatePreviewSessionHandler(dependencies),
+    readPreviewSession: new ReadPreviewSessionHandler(dependencies),
+    refreshPreviewSession: new RefreshPreviewSessionHandler(dependencies),
+    readTeamDirectory: new ReadTeamDirectoryHandler(dependencies),
+    inviteTeamMember: new InviteTeamMemberHandler(dependencies),
+    addTeamMember: new AddTeamMemberHandler(dependencies),
+    updateTeamRoleMappings: new UpdateTeamRoleMappingsHandler(dependencies),
     scheduleContent: new ScheduleContentHandler(dependencies),
     executeSchedule: new ExecuteScheduleHandler(dependencies),
     executeDueSchedules: new ExecuteDueSchedulesHandler(dependencies),
     submitChange: new SubmitChangeHandler(dependencies),
     reviewChange: new ReviewChangeHandler(dependencies),
+    resolveReviewComment: new ResolveReviewCommentHandler(dependencies),
+    assignReviewers: new AssignReviewersHandler(dependencies),
     requestChanges: new RequestChangesHandler(dependencies),
     archiveChange: new ArchiveChangeHandler(dependencies),
+    readStagingBatch: new ReadStagingBatchHandler(dependencies),
+    readAuditTimeline: new ReadAuditTimelineHandler(dependencies),
+    lockStagingBatch: new LockStagingBatchHandler(dependencies),
+    unlockStagingBatch: new UnlockStagingBatchHandler(dependencies),
+    removeChangeFromStaging: new RemoveChangeFromStagingHandler(dependencies),
     approveChange: new ApproveChangeHandler(dependencies),
+    readChangeConflicts: new ReadChangeConflictsHandler(dependencies),
+    resolveChangeConflicts: new ResolveChangeConflictsHandler(dependencies),
     addChangeToStaging: new AddChangeToStagingHandler(dependencies),
     promoteStaging: new PromoteStagingHandler(dependencies),
     buildAndPublishRelease: new BuildAndPublishReleaseHandler(dependencies),
     publishStaging: new PublishStagingHandler(dependencies),
+    publishEmergencyChange: new PublishEmergencyChangeHandler(dependencies),
     publishRelease: new PublishReleaseHandler(dependencies),
+    revalidateRelease: new RevalidateReleaseHandler(dependencies),
     rollbackRelease: new RollbackReleaseHandler(dependencies),
   };
 }

@@ -1,4 +1,4 @@
-import type { Actor, Change, GitCommitSha } from "@git-native-cms/core";
+import type { Actor, Change, GitCommitSha, ReleaseId } from "@git-native-cms/core";
 
 export function slugifyBranchPart(value: string): string {
   return value
@@ -22,6 +22,51 @@ export function buildChangeBranchName(input: {
 
 export function changeCommitMessage(change: Change, summary: string): string {
   return `${summary}\n\nChange-ID: ${change.id}\nCMS-Actor: ${change.ownerId}`;
+}
+
+export function commitAuthor(actor: Actor): {
+  readonly name: string;
+  readonly email: string;
+} {
+  return {
+    name: actor.displayName,
+    email: `${String(actor.githubId)}+${slugifyBranchPart(actor.login)}@users.noreply.github.com`,
+  };
+}
+
+export function planChangeMerge(
+  change: Change,
+  options: { readonly mainBranch?: string; readonly stagingBranch?: string } = {},
+): {
+  readonly head: string;
+  readonly base: string;
+  readonly strategy: "squash";
+  readonly deleteBranch: true;
+  readonly forwardSyncRequired: boolean;
+} {
+  return {
+    head: change.branchName,
+    base:
+      change.emergency === true
+        ? (options.mainBranch ?? "main")
+        : (options.stagingBranch ?? "staging"),
+    strategy: "squash",
+    deleteBranch: true,
+    forwardSyncRequired: change.emergency === true,
+  };
+}
+
+export function releaseCommitMessage(input: {
+  readonly releaseId: ReleaseId;
+  readonly revision: GitCommitSha;
+  readonly changeIds: readonly string[];
+}): string {
+  return [
+    `Publish release ${input.releaseId}`,
+    "",
+    `Release-Revision: ${input.revision}`,
+    ...[...new Set(input.changeIds)].sort().map((id) => `Change-ID: ${id}`),
+  ].join("\n");
 }
 
 export interface SemanticFileDiff {

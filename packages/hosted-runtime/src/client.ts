@@ -1,9 +1,14 @@
 import type { ChangeStatus, Revision } from "@git-native-cms/core";
-import type { Asset } from "@git-native-cms/application";
+import type {
+  Asset,
+  ChangeConflictResolution,
+  ContentScheduleAction,
+} from "@git-native-cms/application";
 import type { AssetId, Change, ContentDocument } from "@git-native-cms/core";
 
 export interface HostedWorkflowActionInput {
   readonly action: "submit" | "approve" | "stage" | "publish";
+  readonly emergency?: boolean;
   readonly changeId: string;
   readonly changeName: string;
   readonly csrfToken: string;
@@ -20,6 +25,28 @@ export interface HostedWorkflowActionResult {
   readonly releaseId?: string;
 }
 
+export async function resolveHostedChangeConflicts(input: {
+  readonly changeId: string;
+  readonly expectedRevision: Revision;
+  readonly resolutions: readonly ChangeConflictResolution[];
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<{ readonly status: ChangeStatus; readonly revision: Revision }> {
+  const baseUrl = (input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "");
+  const payload = await requestPayload<{
+    readonly change: { readonly status: ChangeStatus };
+    readonly revision: Revision;
+  }>({
+    path: `${baseUrl}/changes/${encodeURIComponent(input.changeId)}/conflicts/resolve`,
+    csrfToken: input.csrfToken,
+    body: {
+      expectedRevision: input.expectedRevision,
+      resolutions: input.resolutions,
+    },
+  });
+  return { status: payload.change.status, revision: payload.revision };
+}
+
 interface ErrorEnvelope {
   readonly payload?: {
     readonly error?: {
@@ -32,7 +59,7 @@ async function requestPayload<TPayload>(input: {
   readonly path: string;
   readonly csrfToken: string;
   readonly body: Readonly<Record<string, unknown>>;
-  readonly method?: "POST" | "PATCH" | "DELETE";
+  readonly method?: "POST" | "PUT" | "PATCH" | "DELETE";
 }): Promise<TPayload> {
   const idempotencyKey = globalThis.crypto.randomUUID();
   const response = await fetch(input.path, {
@@ -78,6 +105,10 @@ async function confirmationToken(
 export async function createHostedChange(input: {
   readonly name: string;
   readonly description?: string;
+  readonly baseBranch?: string;
+  readonly collaborators?: readonly string[];
+  readonly targetDate?: string;
+  readonly emergency?: boolean;
   readonly csrfToken: string;
   readonly apiBaseUrl?: string;
 }): Promise<Change> {
@@ -87,6 +118,10 @@ export async function createHostedChange(input: {
     body: {
       name: input.name,
       ...(input.description === undefined ? {} : { description: input.description }),
+      ...(input.baseBranch === undefined ? {} : { baseBranch: input.baseBranch }),
+      ...(input.collaborators === undefined ? {} : { collaborators: input.collaborators }),
+      ...(input.targetDate === undefined ? {} : { targetDate: input.targetDate }),
+      ...(input.emergency === true ? { emergency: true } : {}),
     },
   });
   return payload.change;
@@ -148,6 +183,44 @@ export async function addHostedReviewComment(input: {
   });
 }
 
+export async function resolveHostedReviewComment(input: {
+  readonly changeId: string;
+  readonly pullRequestNumber: number;
+  readonly commentId: string;
+  readonly resolved: boolean;
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<void> {
+  await requestPayload({
+    path: `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/changes/${encodeURIComponent(input.changeId)}/comments/${encodeURIComponent(input.commentId)}/resolve`,
+    csrfToken: input.csrfToken,
+    body: {
+      pullRequestNumber: input.pullRequestNumber,
+      resolved: input.resolved,
+    },
+  });
+}
+
+export async function assignHostedReviewers(input: {
+  readonly changeId: string;
+  readonly pullRequestNumber: number;
+  readonly users: readonly string[];
+  readonly teams: readonly string[];
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<void> {
+  await requestPayload({
+    path: `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/changes/${encodeURIComponent(input.changeId)}/reviewers`,
+    method: "PUT",
+    csrfToken: input.csrfToken,
+    body: {
+      pullRequestNumber: input.pullRequestNumber,
+      users: input.users,
+      teams: input.teams,
+    },
+  });
+}
+
 export async function requestHostedChanges(input: {
   readonly changeId: string;
   readonly pullRequestNumber: number;
@@ -203,9 +276,13 @@ export async function uploadHostedAsset(input: {
       checksum,
     },
   });
-  const putResponse = await fetch(upload.url, {
+  const uploadUrl = new URL(upload.url, window.location.href);
+  const putResponse = await fetch(uploadUrl, {
     method: "PUT",
-    headers: upload.headers,
+    headers: {
+      ...upload.headers,
+      ...(uploadUrl.origin === window.location.origin ? { "x-csrf-token": input.csrfToken } : {}),
+    },
     body: input.file,
   });
   if (!putResponse.ok) {
@@ -239,6 +316,100 @@ export async function deleteHostedAsset(input: {
     },
   });
   return payload.revision;
+}
+
+export async function updateHostedAsset(input: {
+  readonly changeId: string;
+  readonly assetId: AssetId;
+  readonly altText: string | null;
+  readonly focalPoint: { readonly x: number; readonly y: number } | null;
+  readonly expectedRevision: Revision;
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<{ readonly asset: Asset; readonly revision: Revision }> {
+  return requestPayload({
+    path: `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/assets/${encodeURIComponent(input.assetId)}`,
+    method: "PATCH",
+    csrfToken: input.csrfToken,
+    body: {
+      changeId: input.changeId,
+      altText: input.altText,
+      focalPoint: input.focalPoint,
+      expectedRevision: input.expectedRevision,
+    },
+  });
+}
+
+export async function findHostedAssetUsages(input: {
+  readonly assetId: AssetId;
+  readonly apiBaseUrl?: string;
+}): Promise<readonly string[]> {
+  const response = await fetch(
+    `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/assets/${encodeURIComponent(input.assetId)}/usages`,
+    { headers: { accept: "application/json" }, cache: "no-store" },
+  );
+  const envelope = (await response.json().catch(() => undefined)) as
+    { readonly payload?: { readonly paths?: readonly string[] } } | undefined;
+  if (!response.ok || envelope?.payload?.paths === undefined) {
+    throw new Error(`Asset usage lookup failed with status ${response.status}.`);
+  }
+  return envelope.payload.paths;
+}
+
+export async function inviteHostedTeamMember(input: {
+  readonly email: string;
+  readonly role: "direct_member" | "admin";
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<{ readonly id: string; readonly status: "pending" }> {
+  const payload = await requestPayload<{
+    readonly invitation: { readonly id: string; readonly status: "pending" };
+  }>({
+    path: `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/team/invitations`,
+    csrfToken: input.csrfToken,
+    body: { email: input.email, role: input.role },
+  });
+  return payload.invitation;
+}
+
+export async function addHostedTeamMember(input: {
+  readonly teamSlug: string;
+  readonly username: string;
+  readonly role: "member" | "maintainer";
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<void> {
+  await requestPayload({
+    path: `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/team/teams/${encodeURIComponent(input.teamSlug)}/members/${encodeURIComponent(input.username)}`,
+    method: "PUT",
+    csrfToken: input.csrfToken,
+    body: { role: input.role },
+  });
+}
+
+export async function updateHostedTeamRoleMappings(input: {
+  readonly mappings: readonly {
+    readonly team: string;
+    readonly roles: readonly string[];
+  }[];
+  readonly customRoles?: readonly {
+    readonly name: string;
+    readonly actions: readonly string[];
+  }[];
+  readonly expectedRevision: Revision;
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<{ readonly pullRequest: { readonly url: string } }> {
+  return requestPayload({
+    path: `${(input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "")}/team/role-mappings`,
+    method: "PUT",
+    csrfToken: input.csrfToken,
+    body: {
+      mappings: input.mappings,
+      ...(input.customRoles === undefined ? {} : { customRoles: input.customRoles }),
+      expectedRevision: input.expectedRevision,
+    },
+  });
 }
 
 export async function importHostedTranslation(input: {
@@ -309,7 +480,7 @@ export async function readHostedTranslationJob(input: {
 export async function scheduleHostedContent(input: {
   readonly changeId: string;
   readonly documentIds: readonly string[];
-  readonly action: "publish" | "unpublish";
+  readonly action: ContentScheduleAction;
   readonly executeAt: string;
   readonly expectedRevision: Revision;
   readonly csrfToken: string;
@@ -386,6 +557,53 @@ export async function publishHostedStaging(input: {
   });
 }
 
+export async function lockHostedStaging(input: {
+  readonly expectedRevision: Revision;
+  readonly checklist: readonly string[];
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<Revision> {
+  const baseUrl = (input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "");
+  const payload = await requestPayload<{ readonly revision: Revision }>({
+    path: `${baseUrl}/staging/lock`,
+    csrfToken: input.csrfToken,
+    body: {
+      expectedRevision: input.expectedRevision,
+      checklist: input.checklist,
+    },
+  });
+  return payload.revision;
+}
+
+export async function unlockHostedStaging(input: {
+  readonly expectedRevision: Revision;
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<Revision> {
+  const baseUrl = (input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "");
+  const payload = await requestPayload<{ readonly revision: Revision }>({
+    path: `${baseUrl}/staging/unlock`,
+    csrfToken: input.csrfToken,
+    body: { expectedRevision: input.expectedRevision },
+  });
+  return payload.revision;
+}
+
+export async function removeHostedChangeFromStaging(input: {
+  readonly changeId: string;
+  readonly expectedRevision: Revision;
+  readonly csrfToken: string;
+  readonly apiBaseUrl?: string;
+}): Promise<Revision> {
+  const baseUrl = (input.apiBaseUrl ?? "/api/cms").replace(/\/$/u, "");
+  const payload = await requestPayload<{ readonly revision: Revision }>({
+    path: `${baseUrl}/changes/${encodeURIComponent(input.changeId)}/remove-from-staging`,
+    csrfToken: input.csrfToken,
+    body: { expectedRevision: input.expectedRevision },
+  });
+  return payload.revision;
+}
+
 export async function advanceHostedWorkflow(
   input: HostedWorkflowActionInput,
 ): Promise<HostedWorkflowActionResult> {
@@ -412,6 +630,35 @@ export async function advanceHostedWorkflow(
     return {
       status: "published",
       revision: payload.mainRevision,
+      releaseId: payload.releaseId,
+    };
+  }
+
+  if (input.action === "stage" && input.emergency === true) {
+    if (input.pullRequestNumber === undefined) {
+      throw new Error("This Emergency Change has no pull request. Refresh and try again.");
+    }
+    const confirmation = await confirmationToken(input.csrfToken, "publish", baseUrl);
+    const payload = await requestPayload<{
+      readonly change: { readonly status: ChangeStatus };
+      readonly revision: Revision;
+      readonly releaseId: string;
+    }>({
+      path: `${changePath}/publish-emergency`,
+      csrfToken: input.csrfToken,
+      body: {
+        pullRequestNumber: input.pullRequestNumber,
+        expectedRevision: input.expectedRevision,
+        configVersion: 1,
+        registryDigest: input.registryDigest,
+        schemaVersion: 1,
+        confirmationToken: confirmation,
+      },
+    });
+    return {
+      status: payload.change.status,
+      revision: payload.revision,
+      pullRequestNumber: input.pullRequestNumber,
       releaseId: payload.releaseId,
     };
   }

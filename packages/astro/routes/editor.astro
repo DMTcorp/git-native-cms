@@ -1,7 +1,7 @@
 ---
 import "@git-native-cms/editor-ui/styles.css";
-import { hostedRuntime } from "../../cms-runtime";
-import { CmsDemo } from "../../components/CmsDemo";
+import { hostedRuntime } from "virtual:git-native-cms/runtime";
+import { CmsEditor } from "virtual:git-native-cms/registry";
 
 const state = await hostedRuntime.editorState(Astro.request, Astro.params.path ?? "");
 ---
@@ -10,7 +10,8 @@ const state = await hostedRuntime.editorState(Astro.request, Astro.params.path ?
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>CMS · Astro playground</title>
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Content workspace</title>
   </head>
-  <body><CmsDemo state={state} client:load /></body>
+  <body><CmsEditor state={state} client:load /></body>
 </html>

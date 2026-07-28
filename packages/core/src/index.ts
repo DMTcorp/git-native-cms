@@ -86,6 +86,9 @@ export interface Change {
   readonly id: ChangeId;
   readonly name: string;
   readonly description?: string;
+  readonly collaborators?: readonly string[];
+  readonly targetDate?: string;
+  readonly emergency?: boolean;
   readonly ownerId: ActorId;
   readonly baseBranch: string;
   readonly baseCommit: GitCommitSha;

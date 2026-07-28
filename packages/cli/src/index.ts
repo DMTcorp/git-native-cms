@@ -1,17 +1,21 @@
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { CmsMcpContext } from "@git-native-cms/mcp";
 import { runMcpStdio } from "@git-native-cms/mcp";
+import type { StoredRelease } from "@git-native-cms/application";
 import { buildRelease } from "@git-native-cms/release-builder";
-import { yamlCodec } from "@git-native-cms/content-codecs";
+import { canonicalJson, yamlCodec } from "@git-native-cms/content-codecs";
 import {
   createScheduleExecutorWorkflow,
   createScheduledPublicationWorkflow,
 } from "@git-native-cms/integrations";
 import { migrateContent } from "@git-native-cms/migrations";
+import ts from "typescript";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,7 +24,45 @@ export interface CliIo {
   readonly stderr: (message: string) => void;
 }
 
+export interface GitHubSetupTransport {
+  readonly origin: string;
+  readonly redirectUrl: string;
+  readonly setupUrl: string;
+  readonly code: Promise<string>;
+  readonly installationId: Promise<number>;
+  close(): Promise<void>;
+}
+
 export interface CliRuntime {
+  readonly dev?: () => Promise<void>;
+  readonly githubSetup?: (input: {
+    readonly origin: string;
+    readonly owner: string;
+    readonly dryRun: boolean;
+  }) => Promise<Readonly<Record<string, unknown>>>;
+  readonly fetch?: typeof globalThis.fetch;
+  readonly openUrl?: (url: string) => Promise<void>;
+  readonly githubSetupTransport?: () => Promise<GitHubSetupTransport>;
+  readonly registryManifest?: () => Promise<unknown>;
+  readonly buildRelease?: (input: {
+    readonly ref: string;
+    readonly environment: "preview" | "staging" | "production";
+    readonly dryRun: boolean;
+  }) => Promise<StoredRelease>;
+  readonly migrateContent?: (input: {
+    readonly path: string;
+    readonly targetVersion: number;
+    readonly dryRun: boolean;
+  }) => Promise<Readonly<Record<string, unknown>>>;
+  readonly generate?: (input: {
+    readonly target: string;
+    readonly dryRun: boolean;
+  }) => Promise<readonly string[]>;
+  readonly codemod?: (input: {
+    readonly target: string;
+    readonly dryRun: boolean;
+  }) => Promise<readonly string[]>;
+  readonly inspectAdapters?: () => Promise<Readonly<Record<string, unknown>>>;
   readonly mcpContext?: () => Promise<CmsMcpContext>;
   readonly publish?: (input: {
     readonly environment: "staging" | "production";
@@ -48,7 +90,16 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function init(cwd: string, io: CliIo): Promise<number> {
+async function init(cwd: string, io: CliIo, dryRun = false): Promise<number> {
+  if (dryRun) {
+    io.stdout(
+      [
+        "Dry run — no files were written.",
+        "Would generate CMS config, runtime, registry, editor/API/preview routes, content configuration and GitHub Actions workflows.",
+      ].join("\n"),
+    );
+    return 0;
+  }
   const packagePath = resolve(cwd, "package.json");
   const packageSource = (await exists(packagePath)) ? await readFile(packagePath, "utf8") : "";
   const isAstro = packageSource.includes('"astro"') && !packageSource.includes('"next"');
@@ -66,16 +117,20 @@ async function init(cwd: string, io: CliIo): Promise<number> {
   await mkdir(runtimeDirectory, { recursive: true });
   const runtimePath = resolve(runtimeDirectory, "runtime.ts");
   if (!(await exists(runtimePath))) {
-    const frameworkServer = isAstro ? "@git-native-cms/astro" : "@git-native-cms/next/server";
+    const frameworkServer = isAstro
+      ? "@git-native-cms/astro/server"
+      : "@git-native-cms/next/server";
     await writeFile(
       runtimePath,
       [
         `import { createHostedCmsRuntime } from ${JSON.stringify(frameworkServer)};`,
+        'import { cmsRegistry } from "./registry";',
         "",
         "export const cmsRuntime = createHostedCmsRuntime({",
         '  origin: process.env.CMS_ORIGIN ?? "http://localhost:3000",',
         '  projectName: process.env.CMS_PROJECT_NAME ?? "Content",',
         "  environment: process.env,",
+        "  registryManifest: cmsRegistry.manifest,",
         "  repository: {",
         '    owner: process.env.CMS_GITHUB_OWNER ?? "",',
         '    name: process.env.CMS_GITHUB_REPOSITORY ?? "",',
@@ -132,7 +187,9 @@ async function init(cwd: string, io: CliIo): Promise<number> {
   }
   const previewComponentPath = resolve(runtimeDirectory, "preview.tsx");
   if (!(await exists(previewComponentPath))) {
-    const frameworkEditor = isAstro ? "@git-native-cms/astro" : "@git-native-cms/next/editor";
+    const frameworkEditor = isAstro
+      ? "@git-native-cms/astro/preview"
+      : "@git-native-cms/next/editor";
     await writeFile(
       previewComponentPath,
       [
@@ -173,8 +230,9 @@ async function init(cwd: string, io: CliIo): Promise<number> {
         [
           "---",
           'import "@git-native-cms/astro/styles.css";',
-          'import { CmsHostedApp } from "@git-native-cms/astro";',
+          'import { CmsHostedApp } from "@git-native-cms/astro/editor";',
           'import { cmsRuntime } from "../../cms/runtime";',
+          'import { cmsRegistry } from "../../cms/registry";',
           "",
           'const state = await cmsRuntime.editorState(Astro.request, Astro.params.path ?? "");',
           "---",
@@ -185,7 +243,7 @@ async function init(cwd: string, io: CliIo): Promise<number> {
           '    <meta name="viewport" content="width=device-width" />',
           "    <title>Content editor</title>",
           "  </head>",
-          "  <body><CmsHostedApp state={state} client:load /></body>",
+          "  <body><CmsHostedApp state={state} registry={cmsRegistry} client:load /></body>",
           "</html>",
           "",
         ].join("\n"),
@@ -221,6 +279,7 @@ async function init(cwd: string, io: CliIo): Promise<number> {
     }
   } else {
     const usesSourceApp = await exists(resolve(cwd, "src/app"));
+    const registryImport = usesSourceApp ? "@/cms/registry" : "@/src/cms/registry";
     const routeDirectory = resolve(
       cwd,
       usesSourceApp ? "src/app/api/cms/[[...path]]" : "app/api/cms/[[...path]]",
@@ -274,6 +333,7 @@ async function init(cwd: string, io: CliIo): Promise<number> {
           'import { headers } from "next/headers";',
           'import { CmsHostedApp } from "@git-native-cms/next/editor";',
           `import { cmsRuntime } from ${JSON.stringify(runtimeImport)};`,
+          `import { cmsRegistry } from ${JSON.stringify(registryImport)};`,
           "",
           'export const dynamic = "force-dynamic";',
           "",
@@ -286,7 +346,7 @@ async function init(cwd: string, io: CliIo): Promise<number> {
           '    requestHeaders.get("cookie"),',
           '    params.path?.join("/") ?? "",',
           "  );",
-          "  return <CmsHostedApp state={state} />;",
+          "  return <CmsHostedApp state={state} registry={cmsRegistry} />;",
           "}",
           "",
         ].join("\n"),
@@ -418,6 +478,12 @@ async function doctor(cwd: string, io: CliIo, runtime?: CliRuntime): Promise<num
   const astroPreview =
     (await exists(resolve(cwd, "src/pages/[cmsRoot]/preview/[...slug].astro"))) ||
     (await exists(resolve(cwd, "src/pages/__cms/preview/[...slug].astro")));
+  const astroConfigPath = (await exists(resolve(cwd, "astro.config.ts")))
+    ? resolve(cwd, "astro.config.ts")
+    : resolve(cwd, "astro.config.mjs");
+  const astroIntegration =
+    (await exists(astroConfigPath)) &&
+    (await readFile(astroConfigPath, "utf8")).includes("gitNativeCms");
   const requiredEnvironment = [
     "GITHUB_APP_ID",
     "GITHUB_APP_PRIVATE_KEY",
@@ -458,20 +524,21 @@ async function doctor(cwd: string, io: CliIo, runtime?: CliRuntime): Promise<num
     },
     {
       name: "server API route",
-      ok: nextRoute || astroRoute,
+      ok: nextRoute || astroRoute || astroIntegration,
       repair: "Mount the catch-all CMS API route documented for your framework.",
     },
     {
       name: "editor route",
-      ok: nextEditor || astroEditor,
+      ok: nextEditor || astroEditor || astroIntegration,
       repair: "Run `cms init` to generate the framework editor route.",
     },
     {
       name: "preview route and registry",
       ok:
-        (nextPreview || astroPreview) &&
-        (await exists(resolve(cwd, "src/cms/registry.tsx"))) &&
-        (await exists(resolve(cwd, "src/cms/preview.tsx"))),
+        ((nextPreview || astroPreview) &&
+          (await exists(resolve(cwd, "src/cms/registry.tsx"))) &&
+          (await exists(resolve(cwd, "src/cms/preview.tsx")))) ||
+        astroIntegration,
       repair: "Generate the preview route and register site sections.",
     },
     {
@@ -571,6 +638,618 @@ function option(argv: readonly string[], name: string): string | undefined {
   return index < 0 ? undefined : argv[index + 1];
 }
 
+function flag(argv: readonly string[], name: string): boolean {
+  return argv.includes(name);
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function htmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+async function dev(cwd: string, io: CliIo, runtime: CliRuntime | undefined): Promise<number> {
+  if (runtime?.dev !== undefined) {
+    await runtime.dev();
+    return 0;
+  }
+  const packageManager = (await exists(resolve(cwd, "pnpm-lock.yaml")))
+    ? "pnpm"
+    : (await exists(resolve(cwd, "yarn.lock")))
+      ? "yarn"
+      : "npm";
+  const arguments_ = packageManager === "npm" ? ["run", "dev"] : ["dev"];
+  io.stdout(`Starting the project with ${packageManager} ${arguments_.join(" ")}.`);
+  const result = await execFileAsync(packageManager, arguments_, { cwd });
+  if (result.stdout.length > 0) io.stdout(result.stdout.trimEnd());
+  if (result.stderr.length > 0) io.stderr(result.stderr.trimEnd());
+  return 0;
+}
+
+function githubAppManifest(input: {
+  readonly origin: string;
+  readonly name: string;
+  readonly redirectUrl: string;
+  readonly setupUrl?: string;
+}): Readonly<Record<string, unknown>> {
+  const origin = input.origin.replace(/\/$/u, "");
+  return {
+    name: input.name,
+    url: input.origin,
+    redirect_url: input.redirectUrl,
+    callback_urls: [`${origin}/api/cms/auth/github/callback`],
+    ...(input.setupUrl === undefined
+      ? {}
+      : { setup_url: input.setupUrl, setup_on_update: true }),
+    public: false,
+    hook_attributes: {
+      active: true,
+      url: `${origin}/api/cms/webhooks/github`,
+    },
+    default_permissions: {
+      checks: "write",
+      contents: "write",
+      deployments: "write",
+      members: "write",
+      metadata: "read",
+      pull_requests: "write",
+    },
+    default_events: [
+      "check_run",
+      "check_suite",
+      "deployment",
+      "deployment_status",
+      "installation_repositories",
+      "pull_request",
+      "pull_request_review",
+      "pull_request_review_comment",
+      "push",
+    ],
+  };
+}
+
+function githubManifestForm(owner: string, manifestSource: string): string {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Create GitHub App</title></head>
+<body>
+  <form id="github-app-manifest" method="post" action="https://github.com/organizations/${htmlAttribute(owner)}/settings/apps/new">
+    <input type="hidden" name="manifest" value="${htmlAttribute(manifestSource)}">
+    <button type="submit">Create GitHub App</button>
+  </form>
+</body></html>
+`;
+}
+
+async function openExternalUrl(url: string): Promise<void> {
+  if (process.platform === "darwin") {
+    await execFileAsync("open", [url]);
+    return;
+  }
+  if (process.platform === "win32") {
+    await execFileAsync("cmd", ["/c", "start", "", url]);
+    return;
+  }
+  await execFileAsync("xdg-open", [url]);
+}
+
+interface GitHubManifestConversion {
+  readonly id: number;
+  readonly slug: string;
+  readonly html_url: string;
+  readonly pem: string;
+  readonly client_id: string;
+  readonly client_secret: string;
+  readonly webhook_secret: string;
+}
+
+function githubManifestConversion(value: unknown): GitHubManifestConversion {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("GitHub returned an invalid App manifest conversion.");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  if (
+    !Number.isSafeInteger(record.id) ||
+    typeof record.slug !== "string" ||
+    typeof record.html_url !== "string" ||
+    typeof record.pem !== "string" ||
+    typeof record.client_id !== "string" ||
+    typeof record.client_secret !== "string" ||
+    typeof record.webhook_secret !== "string"
+  ) {
+    throw new Error("GitHub App manifest conversion is missing required credentials.");
+  }
+  return record as unknown as GitHubManifestConversion;
+}
+
+async function githubSetupServer(): Promise<GitHubSetupTransport> {
+  const state = globalThis.crypto.randomUUID();
+  let resolveCode: (value: string) => void = () => undefined;
+  let rejectCode: (reason: Error) => void = () => undefined;
+  let resolveInstallation: (value: number) => void = () => undefined;
+  let rejectInstallation: (reason: Error) => void = () => undefined;
+  const code = new Promise<string>((resolvePromise, rejectPromise) => {
+    resolveCode = resolvePromise;
+    rejectCode = rejectPromise;
+  });
+  const installationId = new Promise<number>((resolvePromise, rejectPromise) => {
+    resolveInstallation = resolvePromise;
+    rejectInstallation = rejectPromise;
+  });
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.setHeader("cache-control", "no-store");
+    if (request.method === "GET" && url.pathname === `/callback/${state}`) {
+      const manifestCode = url.searchParams.get("code");
+      if (manifestCode === null || manifestCode.length === 0) {
+        response.statusCode = 400;
+        response.end("<h1>GitHub App creation failed</h1><p>Return to the terminal.</p>");
+        rejectCode(new Error("GitHub did not return a manifest conversion code."));
+        return;
+      }
+      response.end("<h1>GitHub App created</h1><p>Return to the terminal to install it.</p>");
+      resolveCode(manifestCode);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === `/installed/${state}`) {
+      const value = Number(url.searchParams.get("installation_id"));
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        response.statusCode = 400;
+        response.end("<h1>GitHub App installation failed</h1><p>Return to the terminal.</p>");
+        rejectInstallation(new Error("GitHub did not return a valid installation ID."));
+        return;
+      }
+      response.end("<h1>GitHub App installed</h1><p>You can close this tab.</p>");
+      resolveInstallation(value);
+      return;
+    }
+    response.statusCode = 404;
+    response.end("<h1>Not found</h1>");
+  });
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", () => resolvePromise());
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    server.close();
+    throw new Error("Could not bind the local GitHub App callback.");
+  }
+  const origin = `http://127.0.0.1:${String(address.port)}`;
+  const timeout = setTimeout(() => {
+    const error = new Error("GitHub App setup timed out after 10 minutes.");
+    rejectCode(error);
+    rejectInstallation(error);
+  }, 10 * 60_000);
+  timeout.unref();
+  return {
+    origin,
+    redirectUrl: `${origin}/callback/${state}`,
+    setupUrl: `${origin}/installed/${state}`,
+    code,
+    installationId,
+    async close() {
+      clearTimeout(timeout);
+      await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+    },
+  };
+}
+
+async function writeGitHubEnvironment(input: {
+  readonly cwd: string;
+  readonly origin: string;
+  readonly owner: string;
+  readonly conversion: GitHubManifestConversion;
+  readonly installationId: number;
+}): Promise<string> {
+  const path = resolve(input.cwd, ".env.cms.local");
+  const source = [
+    `CMS_ORIGIN=${JSON.stringify(input.origin.replace(/\/$/u, ""))}`,
+    `CMS_GITHUB_OWNER=${JSON.stringify(input.owner)}`,
+    `GITHUB_APP_ID=${String(input.conversion.id)}`,
+    `GITHUB_APP_INSTALLATION_ID=${String(input.installationId)}`,
+    `GITHUB_APP_PRIVATE_KEY=${JSON.stringify(input.conversion.pem)}`,
+    `GITHUB_OAUTH_CLIENT_ID=${JSON.stringify(input.conversion.client_id)}`,
+    `GITHUB_OAUTH_CLIENT_SECRET=${JSON.stringify(input.conversion.client_secret)}`,
+    `GITHUB_WEBHOOK_SECRET=${JSON.stringify(input.conversion.webhook_secret)}`,
+    "",
+  ].join("\n");
+  await writeFile(path, source, { mode: 0o600 });
+  await chmod(path, 0o600);
+  const ignorePath = resolve(input.cwd, ".gitignore");
+  const ignore = (await exists(ignorePath)) ? await readFile(ignorePath, "utf8") : "";
+  if (!ignore.split(/\r?\n/u).includes(".env.cms.local")) {
+    await writeFile(
+      ignorePath,
+      `${ignore}${ignore.length === 0 || ignore.endsWith("\n") ? "" : "\n"}.env.cms.local\n`,
+    );
+  }
+  return path;
+}
+
+async function githubSetup(
+  cwd: string,
+  argv: readonly string[],
+  io: CliIo,
+  runtime: CliRuntime | undefined,
+  dryRun: boolean,
+): Promise<number> {
+  const origin = option(argv, "--origin") ?? process.env.CMS_ORIGIN;
+  const owner = option(argv, "--owner") ?? process.env.CMS_GITHUB_OWNER;
+  if (origin === undefined || owner === undefined) {
+    io.stderr("Usage: cms github setup --origin <https://site.example> --owner <github-owner>");
+    return 1;
+  }
+  if (runtime?.githubSetup !== undefined) {
+    const result = await runtime.githubSetup({ origin, owner, dryRun });
+    io.stdout(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  const directory = resolve(cwd, ".cms");
+  const manifestPath = resolve(directory, "github-app-manifest.json");
+  const formPath = resolve(directory, "github-app-setup.html");
+  const name = option(argv, "--name") ?? "Git Native CMS";
+  if (dryRun || flag(argv, "--manifest-only")) {
+    const manifestSource = canonicalJson(
+      githubAppManifest({
+        origin,
+        name,
+        redirectUrl: `${origin.replace(/\/$/u, "")}/api/cms/github-app/callback`,
+      }),
+    );
+    const form = githubManifestForm(owner, manifestSource);
+    if (!dryRun) {
+      await mkdir(directory, { recursive: true });
+      await writeFile(manifestPath, `${manifestSource}\n`);
+      await writeFile(formPath, form);
+    }
+    io.stdout(
+      dryRun
+        ? `Dry run — would write ${manifestPath} and ${formPath}.`
+        : `GitHub App manifest ready: ${formPath}`,
+    );
+    io.stdout(
+      "The manifest intentionally omits the unsupported installation default event; GitHub sends installation lifecycle events automatically.",
+    );
+    return 0;
+  }
+
+  const callback = await (runtime?.githubSetupTransport ?? githubSetupServer)();
+  try {
+    const manifestSource = canonicalJson(
+      githubAppManifest({
+        origin,
+        name,
+        redirectUrl: callback.redirectUrl,
+        setupUrl: callback.setupUrl,
+      }),
+    );
+    await mkdir(directory, { recursive: true });
+    await writeFile(manifestPath, `${manifestSource}\n`);
+    await writeFile(formPath, githubManifestForm(owner, manifestSource));
+    io.stdout("Opening GitHub to create the App. Keep this terminal running.");
+    const openUrl = runtime?.openUrl ?? openExternalUrl;
+    if (flag(argv, "--no-open")) {
+      io.stdout(`Open this file in a browser: ${formPath}`);
+    } else {
+      await openUrl(pathToFileURL(formPath).href);
+    }
+    const code = await callback.code;
+    const apiBase = (option(argv, "--github-api-url") ?? "https://api.github.com").replace(
+      /\/$/u,
+      "",
+    );
+    const response = await (runtime?.fetch ?? globalThis.fetch)(
+      `${apiBase}/app-manifests/${encodeURIComponent(code)}/conversions`,
+      {
+        method: "POST",
+        headers: {
+          accept: "application/vnd.github+json",
+          "user-agent": "git-native-cms-cli",
+          "x-github-api-version": "2022-11-28",
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`GitHub App manifest conversion failed with status ${response.status}.`);
+    }
+    const conversion = githubManifestConversion(await response.json());
+    const installationUrl = `${conversion.html_url.replace(/\/$/u, "")}/installations/new`;
+    io.stdout(`GitHub App ${conversion.slug} created. Opening repository installation.`);
+    if (flag(argv, "--no-open")) {
+      io.stdout(`Open this URL in a browser: ${installationUrl}`);
+    } else {
+      await openUrl(installationUrl);
+    }
+    const installationId = await callback.installationId;
+    const environmentPath = await writeGitHubEnvironment({
+      cwd,
+      origin,
+      owner,
+      conversion,
+      installationId,
+    });
+    await writeFile(
+      resolve(directory, "github-app.json"),
+      `${canonicalJson({
+        appId: conversion.id,
+        slug: conversion.slug,
+        installationId,
+        owner,
+        configuredAt: new Date().toISOString(),
+      })}\n`,
+    );
+    io.stdout(
+      `GitHub App connected. Server-only credentials were written with mode 0600 to ${environmentPath}.`,
+    );
+    io.stdout("Copy these values to your deployment provider; never commit this file.");
+    return 0;
+  } finally {
+    await callback.close();
+  }
+}
+
+async function registryBuild(
+  cwd: string,
+  argv: readonly string[],
+  io: CliIo,
+  runtime: CliRuntime | undefined,
+  dryRun: boolean,
+): Promise<number> {
+  const inputPath = resolve(cwd, option(argv, "--input") ?? ".cms/registry.source.json");
+  const manifest: unknown =
+    runtime?.registryManifest === undefined
+      ? (JSON.parse(await readFile(inputPath, "utf8")) as unknown)
+      : await runtime.registryManifest();
+  const source = canonicalJson(manifest);
+  const digest = `sha256:${await sha256(source)}`;
+  const directory = resolve(cwd, ".cms");
+  const manifestPath = resolve(directory, "registry.json");
+  const digestPath = resolve(directory, "registry.sha256");
+  if (!dryRun) {
+    await mkdir(directory, { recursive: true });
+    await writeFile(manifestPath, `${source}\n`);
+    await writeFile(digestPath, `${digest}\n`);
+  }
+  io.stdout(`${dryRun ? "Would build" : "Built"} registry ${digest}.`);
+  return 0;
+}
+
+async function registryValidate(cwd: string, argv: readonly string[], io: CliIo): Promise<number> {
+  const path = resolve(cwd, option(argv, "--input") ?? ".cms/registry.json");
+  const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  if ((typeof value !== "object" || value === null) && !Array.isArray(value)) {
+    io.stderr(`${path} is not a registry object or array.`);
+    return 1;
+  }
+  const source = canonicalJson(value);
+  const digest = `sha256:${await sha256(source)}`;
+  const digestPath = resolve(cwd, ".cms/registry.sha256");
+  if (await exists(digestPath)) {
+    const expected = (await readFile(digestPath, "utf8")).trim();
+    if (expected !== digest) {
+      io.stderr(`Registry digest mismatch: expected ${expected}, received ${digest}.`);
+      return 1;
+    }
+  }
+  io.stdout(`Registry is valid (${digest}).`);
+  return 0;
+}
+
+async function contentMigrate(
+  cwd: string,
+  argv: readonly string[],
+  io: CliIo,
+  runtime: CliRuntime | undefined,
+  dryRun: boolean,
+): Promise<number> {
+  const argument = argv[2] ?? option(argv, "--file");
+  const targetVersion = Number(option(argv, "--target"));
+  if (argument === undefined || !Number.isSafeInteger(targetVersion) || targetVersion < 1) {
+    io.stderr("Usage: cms content migrate <file> --target <schema-version> [--dry-run]");
+    return 1;
+  }
+  const path = resolve(cwd, argument);
+  if (runtime?.migrateContent !== undefined) {
+    const result = await runtime.migrateContent({ path, targetVersion, dryRun });
+    io.stdout(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  const value = yamlCodec.parse(await readFile(path, "utf8"));
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    io.stderr(`${path} does not contain a content object.`);
+    return 1;
+  }
+  const record = value as Record<string, unknown>;
+  const fromVersion =
+    typeof record.schemaVersion === "number" ? record.schemaVersion : targetVersion;
+  const migrated = migrateContent(record, fromVersion, targetVersion, []);
+  if (!dryRun) await writeFile(path, yamlCodec.serialize(migrated));
+  io.stdout(
+    `${dryRun ? "Would migrate" : "Migrated"} ${path} from schema v${String(fromVersion)} to v${String(targetVersion)}.`,
+  );
+  return 0;
+}
+
+async function generate(
+  cwd: string,
+  argv: readonly string[],
+  io: CliIo,
+  runtime: CliRuntime | undefined,
+  dryRun: boolean,
+): Promise<number> {
+  const target = option(argv, "--target") ?? "all";
+  if (runtime?.generate !== undefined) {
+    const files = await runtime.generate({ target, dryRun });
+    files.forEach((path) => io.stdout(`${dryRun ? "Would generate" : "Generated"} ${path}`));
+    return 0;
+  }
+  const registryPath = resolve(cwd, ".cms/registry.json");
+  if (!(await exists(registryPath))) {
+    io.stderr("Build the registry before generating artifacts: cms registry build.");
+    return 1;
+  }
+  const source = await readFile(registryPath, "utf8");
+  const outputPath = resolve(cwd, ".cms/generated/registry.d.ts");
+  if (!dryRun) {
+    await mkdir(resolve(cwd, ".cms/generated"), { recursive: true });
+    await writeFile(
+      outputPath,
+      `export declare const registryManifest: ${JSON.stringify(JSON.parse(source) as unknown, null, 2)};\n`,
+    );
+  }
+  io.stdout(`${dryRun ? "Would generate" : "Generated"} ${outputPath}.`);
+  return 0;
+}
+
+async function codemod(
+  cwd: string,
+  argv: readonly string[],
+  io: CliIo,
+  runtime: CliRuntime | undefined,
+  dryRun: boolean,
+): Promise<number> {
+  const target = option(argv, "--target") ?? "latest";
+  if (runtime?.codemod === undefined) {
+    const files = await sourceFiles(cwd);
+    const updated: string[] = [];
+    for (const path of files) {
+      const source = await readFile(path, "utf8");
+      const next = modernizeSource(path, source);
+      if (next === source) continue;
+      updated.push(path);
+      if (!dryRun) await writeFile(path, next);
+    }
+    if (updated.length === 0) {
+      io.stdout(`AST codemod target ${target} found no legacy CMS APIs.`);
+      return 0;
+    }
+    updated.forEach((path) => io.stdout(`${dryRun ? "Would update" : "Updated"} ${path}`));
+    return 0;
+  }
+  const files = await runtime.codemod({ target, dryRun });
+  files.forEach((path) => io.stdout(`${dryRun ? "Would update" : "Updated"} ${path}`));
+  return 0;
+}
+
+async function sourceFiles(root: string): Promise<readonly string[]> {
+  const ignored = new Set([
+    ".git",
+    ".astro",
+    ".next",
+    "coverage",
+    "dist",
+    "node_modules",
+    "playwright-report",
+  ]);
+  const result: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (ignored.has(entry.name)) continue;
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (/\.(?:[cm]?[jt]sx?)$/u.test(entry.name)) {
+        result.push(path);
+      }
+    }
+  }
+  await visit(root);
+  return result.sort();
+}
+
+function modernizeSource(path: string, source: string): string {
+  const scriptKind = path.endsWith(".tsx")
+    ? ts.ScriptKind.TSX
+    : path.endsWith(".jsx")
+      ? ts.ScriptKind.JSX
+      : path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".cjs")
+        ? ts.ScriptKind.JS
+        : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind);
+  let changed = false;
+  const transformer: ts.TransformerFactory<ts.SourceFile> = (context) => {
+    const visit: ts.Visitor = (node) => {
+      if (ts.isIdentifier(node) && node.text === "defineCMS") {
+        changed = true;
+        return context.factory.createIdentifier("defineCms");
+      }
+      const visited = ts.visitEachChild(node, visit, context);
+      if (
+        (ts.isImportDeclaration(visited) || ts.isExportDeclaration(visited)) &&
+        visited.moduleSpecifier !== undefined &&
+        ts.isStringLiteral(visited.moduleSpecifier) &&
+        visited.moduleSpecifier.text.startsWith("@cms/")
+      ) {
+        changed = true;
+        const moduleSpecifier = context.factory.createStringLiteral(
+          visited.moduleSpecifier.text.replace(/^@cms\//u, "@git-native-cms/"),
+        );
+        if (ts.isImportDeclaration(visited)) {
+          return context.factory.updateImportDeclaration(
+            visited,
+            visited.modifiers,
+            visited.importClause,
+            moduleSpecifier,
+            visited.attributes,
+          );
+        }
+        return context.factory.updateExportDeclaration(
+          visited,
+          visited.modifiers,
+          visited.isTypeOnly,
+          visited.exportClause,
+          moduleSpecifier,
+          visited.attributes,
+        );
+      }
+      return visited;
+    };
+    return (root) => ts.visitNode(root, visit) as ts.SourceFile;
+  };
+  const transformed = ts.transform(sourceFile, [transformer]);
+  try {
+    if (!changed) return source;
+    const result = transformed.transformed[0];
+    return result === undefined
+      ? source
+      : ts.createPrinter({ newLine: ts.NewLineKind.LineFeed }).printFile(result);
+  } finally {
+    transformed.dispose();
+  }
+}
+
+async function adapterInspect(io: CliIo, runtime: CliRuntime | undefined): Promise<number> {
+  const report =
+    (await runtime?.inspectAdapters?.()) ??
+    ({
+      github: {
+        configured:
+          process.env.GITHUB_APP_ID !== undefined &&
+          process.env.GITHUB_APP_INSTALLATION_ID !== undefined,
+      },
+      assets: {
+        adapter: process.env.CMS_ASSETS_BUCKET === undefined ? "none" : "s3-compatible",
+        bucket: process.env.CMS_ASSETS_BUCKET ?? null,
+      },
+      releases: {
+        adapter: process.env.CMS_RELEASES_BUCKET === undefined ? "none" : "s3-compatible",
+        bucket: process.env.CMS_RELEASES_BUCKET ?? null,
+      },
+      sessions: { adapter: "rotating-jwe-cookie" },
+    } satisfies Readonly<Record<string, unknown>>);
+  io.stdout(JSON.stringify(report, null, 2));
+  return 0;
+}
+
 function publicationInput(argv: readonly string[]): {
   readonly environment: "staging" | "production";
   readonly idempotencyKey: string;
@@ -586,7 +1265,12 @@ function publicationInput(argv: readonly string[]): {
   return { environment, idempotencyKey };
 }
 
-async function scheduleCreate(cwd: string, argv: readonly string[], io: CliIo): Promise<number> {
+async function scheduleCreate(
+  cwd: string,
+  argv: readonly string[],
+  io: CliIo,
+  dryRun = false,
+): Promise<number> {
   const cron = option(argv, "--cron");
   const environment = option(argv, "--environment");
   if (cron === undefined || (environment !== "staging" && environment !== "production")) {
@@ -599,14 +1283,16 @@ async function scheduleCreate(cwd: string, argv: readonly string[], io: CliIo): 
     environment,
   });
   const workflows = resolve(cwd, ".github/workflows");
-  await mkdir(workflows, { recursive: true });
   const path = resolve(workflows, `cms-scheduled-${environment}.yml`);
-  await writeFile(path, workflow);
-  io.stdout(`Created ${path}`);
+  if (!dryRun) {
+    await mkdir(workflows, { recursive: true });
+    await writeFile(path, workflow);
+  }
+  io.stdout(`${dryRun ? "Would create" : "Created"} ${path}`);
   return 0;
 }
 
-async function upgrade(cwd: string, io: CliIo): Promise<number> {
+async function upgrade(cwd: string, io: CliIo, dryRun = false): Promise<number> {
   const candidates = [
     resolve(cwd, ".cms/project.yaml"),
     resolve(cwd, "fixtures/content/.cms/project.yaml"),
@@ -635,6 +1321,12 @@ async function upgrade(cwd: string, io: CliIo): Promise<number> {
     return 1;
   }
   const migrated = migrateContent(record, version, 1, []);
+  if (dryRun) {
+    io.stdout(
+      `Dry run — would upgrade ${projectPath} from config v${String(version)} to v1 and create a backup branch and file.`,
+    );
+    return 0;
+  }
   const timestamp = new Date().toISOString().replaceAll(":", "-");
   let backupBranch: string | undefined;
   if (await exists(resolve(cwd, ".git"))) {
@@ -655,8 +1347,45 @@ async function upgrade(cwd: string, io: CliIo): Promise<number> {
   const backupPath = resolve(backupDirectory, `${timestamp}-project.yaml`);
   await writeFile(backupPath, await readFile(projectPath, "utf8"), { flag: "wx" });
   await writeFile(projectPath, yamlCodec.serialize({ ...migrated, configVersion: 1 }));
+  const codemodFiles: string[] = [];
+  for (const path of await sourceFiles(cwd)) {
+    const source = await readFile(path, "utf8");
+    const next = modernizeSource(path, source);
+    if (next === source) continue;
+    await writeFile(path, next);
+    codemodFiles.push(path);
+  }
+  const registryPath = resolve(cwd, ".cms/registry.json");
+  let registryDigest: string | undefined;
+  if (await exists(registryPath)) {
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as unknown;
+    registryDigest = `sha256:${await sha256(canonicalJson(registry))}`;
+    await writeFile(resolve(cwd, ".cms/registry.sha256"), `${registryDigest}\n`);
+  }
+  const reportDirectory = resolve(cwd, ".cms/upgrades");
+  await mkdir(reportDirectory, { recursive: true });
+  const reportPath = resolve(reportDirectory, `${timestamp}.json`);
+  await writeFile(
+    reportPath,
+    `${JSON.stringify(
+      {
+        target: "latest",
+        config: { path: projectPath, fromVersion: version, toVersion: 1 },
+        backup: { file: backupPath, branch: backupBranch ?? null },
+        codemodFiles,
+        registryDigest: registryDigest ?? null,
+        manualActions: [],
+      },
+      null,
+      2,
+    )}\n`,
+    { flag: "wx" },
+  );
   io.stdout(`Backup created: ${backupPath}`);
   if (backupBranch !== undefined) io.stdout(`Backup branch created: ${backupBranch}`);
+  io.stdout(`AST codemods updated ${String(codemodFiles.length)} source file(s).`);
+  if (registryDigest !== undefined) io.stdout(`Registry regenerated: ${registryDigest}`);
+  io.stdout(`Upgrade report: ${reportPath}`);
   io.stdout(`Project configuration is current (v1): ${projectPath}`);
   return 0;
 }
@@ -675,17 +1404,85 @@ export async function runCmsCli(
     stderr: (message) => process.stderr.write(`${message}\n`),
   };
   const [command, subcommand, argument] = argv;
-  if (command === "init") return init(cwd, io);
+  const dryRun = flag(argv, "--dry-run");
+  if (command === "init") return init(cwd, io, dryRun);
+  if (command === "dev") {
+    if (dryRun) {
+      io.stdout("Dry run — would start the framework development server.");
+      return 0;
+    }
+    return dev(cwd, io, options.runtime);
+  }
   if (command === "doctor") return doctor(cwd, io, options.runtime);
-  if (command === "upgrade") return upgrade(cwd, io);
+  if (command === "upgrade") return upgrade(cwd, io, dryRun);
+  if (command === "github" && subcommand === "setup") {
+    return githubSetup(cwd, argv, io, options.runtime, dryRun);
+  }
+  if (command === "registry" && subcommand === "build") {
+    return registryBuild(cwd, argv, io, options.runtime, dryRun);
+  }
+  if (command === "registry" && subcommand === "validate") {
+    return registryValidate(cwd, argv, io);
+  }
   if (command === "content" && subcommand === "validate" && argument !== undefined) {
     return validateContent(resolve(cwd, argument), io);
   }
-  if (command === "release" && subcommand === "build" && argument !== undefined) {
+  if (command === "content" && subcommand === "migrate") {
+    return contentMigrate(cwd, argv, io, options.runtime, dryRun);
+  }
+  if (
+    command === "release" &&
+    subcommand === "build" &&
+    argument !== undefined &&
+    !argument.startsWith("--")
+  ) {
     return releaseBuild(resolve(cwd, argument), io);
   }
+  if (command === "release" && subcommand === "build") {
+    const ref = option(argv, "--ref");
+    const environment = option(argv, "--environment") ?? "production";
+    if (
+      ref === undefined ||
+      !["preview", "staging", "production"].includes(environment) ||
+      options.runtime?.buildRelease === undefined
+    ) {
+      io.stderr(
+        "Usage: cms release build <input.json> or cms release build --ref <git-ref> --environment <preview|staging|production>",
+      );
+      return 1;
+    }
+    const release = await options.runtime.buildRelease({
+      ref,
+      environment: environment as "preview" | "staging" | "production",
+      dryRun,
+    });
+    io.stdout(JSON.stringify(release, null, 2));
+    return 0;
+  }
+  if (command === "release" && subcommand === "publish") {
+    if (options.runtime?.publish === undefined) {
+      io.stderr("The project runtime does not configure release publication.");
+      return 1;
+    }
+    if (dryRun) {
+      io.stdout("Dry run — release pointer and integrations would not be changed.");
+      return 0;
+    }
+    await options.runtime.publish(publicationInput(argv));
+    io.stdout("Published successfully.");
+    return 0;
+  }
+  if (command === "generate") {
+    return generate(cwd, argv, io, options.runtime, dryRun);
+  }
+  if (command === "codemod") {
+    return codemod(cwd, argv, io, options.runtime, dryRun);
+  }
+  if (command === "adapter" && subcommand === "inspect") {
+    return adapterInspect(io, options.runtime);
+  }
   if (command === "schedule" && subcommand === "create") {
-    return scheduleCreate(cwd, argv, io);
+    return scheduleCreate(cwd, argv, io, dryRun);
   }
   if (command === "schedule" && subcommand === "execute") {
     const scheduleId = option(argv, "--schedule-id");
@@ -708,6 +1505,10 @@ export async function runCmsCli(
       io.stderr(`The project runtime does not configure ${command}.`);
       return 1;
     }
+    if (dryRun) {
+      io.stdout(`Dry run — ${command} would not change the environment pointer.`);
+      return 0;
+    }
     await handler(publicationInput(argv));
     io.stdout(`${command === "publish" ? "Published" : "Unpublished"} successfully.`);
     return 0;
@@ -726,15 +1527,27 @@ export async function runCmsCli(
       "",
       "Commands:",
       "  cms init",
+      "  cms dev",
       "  cms doctor",
+      "  cms github setup --origin <url> --owner <github-owner>",
+      "  cms registry build [--input .cms/registry.source.json]",
+      "  cms registry validate [--input .cms/registry.json]",
       "  cms upgrade",
       "  cms content validate <file>",
+      "  cms content migrate <file> --target <schema-version>",
       "  cms release build <input.json>",
+      "  cms release build --ref <git-ref> --environment <preview|staging|production>",
+      "  cms release publish --environment <staging|production> --idempotency-key <key>",
+      "  cms generate [--target all]",
+      "  cms codemod [--target latest]",
+      "  cms adapter inspect",
       "  cms schedule create --cron '<UTC cron>' --environment <staging|production>",
       "  cms schedule execute --schedule-id <id> --expected-at <UTC timestamp>",
       "  cms publish --environment <staging|production> --idempotency-key <key>",
       "  cms unpublish --environment <staging|production> --idempotency-key <key>",
       "  cms mcp",
+      "",
+      "All mutating commands accept --dry-run.",
     ].join("\n"),
   );
   return command === undefined || command === "help" || command === "--help" ? 0 : 1;

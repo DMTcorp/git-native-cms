@@ -1,5 +1,6 @@
 import type {
   AuditEvent,
+  AuditQueryPort,
   AuditSink,
   IdempotencyStore,
   RateLimitPort,
@@ -7,7 +8,7 @@ import type {
 } from "@git-native-cms/application";
 import { canonicalJson } from "@git-native-cms/content-codecs";
 import type { S3Client } from "@aws-sdk/client-s3";
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
 
 function statusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null || !("$metadata" in error)) return undefined;
@@ -108,7 +109,7 @@ export class S3IdempotencyStore extends S3RuntimeState implements IdempotencySto
   }
 }
 
-export class S3AuditSink extends S3RuntimeState implements AuditSink {
+export class S3AuditSink extends S3RuntimeState implements AuditSink, AuditQueryPort {
   async write(event: AuditEvent): Promise<void> {
     await this.options.client.send(
       new PutObjectCommand({
@@ -122,6 +123,69 @@ export class S3AuditSink extends S3RuntimeState implements AuditSink {
         IfNoneMatch: "*",
       }),
     );
+  }
+
+  async list(input: {
+    readonly resourceId?: string;
+    readonly limit?: number;
+    readonly signal?: AbortSignal;
+  }): Promise<readonly AuditEvent[]> {
+    const keys: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const response = await this.options.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.options.bucket,
+          Prefix: this.key("audit/"),
+          ...(continuationToken === undefined
+            ? {}
+            : { ContinuationToken: continuationToken }),
+        }),
+        input.signal === undefined ? undefined : { abortSignal: input.signal },
+      );
+      for (const object of response.Contents ?? []) {
+        if (object.Key !== undefined) keys.push(object.Key);
+      }
+      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    } while (continuationToken !== undefined);
+
+    const events = await Promise.all(
+      keys
+        .sort((left, right) => right.localeCompare(left))
+        .map(async (key): Promise<AuditEvent | undefined> => {
+          try {
+            const response = await this.options.client.send(
+              new GetObjectCommand({ Bucket: this.options.bucket, Key: key }),
+              input.signal === undefined ? undefined : { abortSignal: input.signal },
+            );
+            const body = response.Body as { transformToString(): Promise<string> } | undefined;
+            const parsed: unknown = JSON.parse(await bodyText(body));
+            if (
+              typeof parsed !== "object" ||
+              parsed === null ||
+              !("type" in parsed) ||
+              typeof parsed.type !== "string" ||
+              !("actorId" in parsed) ||
+              typeof parsed.actorId !== "string" ||
+              !("requestId" in parsed) ||
+              typeof parsed.requestId !== "string" ||
+              !("timestamp" in parsed) ||
+              typeof parsed.timestamp !== "string"
+            ) {
+              return undefined;
+            }
+            return parsed as AuditEvent;
+          } catch (error) {
+            if (input.signal?.aborted === true) throw error;
+            return undefined;
+          }
+        }),
+    );
+
+    return events
+      .filter((event): event is AuditEvent => event !== undefined)
+      .filter((event) => input.resourceId === undefined || event.resourceId === input.resourceId)
+      .slice(0, input.limit ?? 100);
   }
 }
 

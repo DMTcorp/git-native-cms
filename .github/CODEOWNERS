@@ -1,0 +1,9 @@
+# Default ownership for product, security and release changes.
+* @mateuszgawlik
+
+# Security-sensitive boundaries require an explicit owner review.
+/packages/auth/ @mateuszgawlik
+/packages/sessions/ @mateuszgawlik
+/packages/permissions/ @mateuszgawlik
+/packages/github/ @mateuszgawlik
+/.github/workflows/ @mateuszgawlik

@@ -1,7 +1,17 @@
-import { contractPassed, GitProviderContract } from "@git-native-cms/adapter-kit";
+import {
+  contractPassed,
+  GitProviderContract,
+  ReviewPortContract,
+} from "@git-native-cms/adapter-kit";
 import type { Actor, GitCommitSha } from "@git-native-cms/core";
-import { describe, expect, it } from "vitest";
-import { GitHubGitProvider, type GitHubRequester } from "./index.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  GitHubGitProvider,
+  GitHubIdentityProvider,
+  GitHubReviewPort,
+  GitHubTeamProvisioning,
+  type GitHubRequester,
+} from "./index.js";
 
 interface FixtureCommit {
   readonly tree: string;
@@ -14,6 +24,7 @@ class GitHubFixtureRequester implements GitHubRequester {
   private readonly trees = new Map<string, Map<string, string>>([["tree-1", new Map()]]);
   private readonly blobs = new Map<string, string>();
   private readonly pullRequests: Record<string, unknown>[] = [];
+  private readonly mergedBefore = new Map<number, string>();
   private readonly hiddenRefReads = new Map<string, number>();
 
   constructor(private readonly visibilityLagReads = 0) {}
@@ -143,6 +154,78 @@ class GitHubFixtureRequester implements GitHubRequester {
       this.pullRequests.push(pullRequest);
       return { data: pullRequest };
     }
+    if (route === "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge") {
+      const pullRequest = this.pullRequests.find(
+        (candidate) => candidate.number === parameters.pull_number,
+      );
+      if (pullRequest === undefined) throw { status: 404 };
+      const head = (pullRequest.head as { ref: string }).ref;
+      const base = (pullRequest.base as { ref: string }).ref;
+      const headSha = this.refs.get(head);
+      const baseSha = this.refs.get(base);
+      if (headSha === undefined || baseSha === undefined || headSha !== parameters.sha) {
+        return { data: { merged: false, message: "Head changed." } };
+      }
+      this.mergedBefore.set(Number(pullRequest.number), baseSha);
+      this.refs.set(base, headSha);
+      pullRequest.state = "closed";
+      pullRequest.merged_at = new Date(0).toISOString();
+      return { data: { merged: true, sha: headSha } };
+    }
+    if (route === "POST /graphql") {
+      const query = String(parameters.query);
+      const variables = parameters.variables as Readonly<Record<string, unknown>>;
+      if (query.includes("query CmsPullRequestId")) {
+        const number = Number(variables.number);
+        const pullRequest = this.pullRequests.find((candidate) => candidate.number === number);
+        return {
+          data: {
+            data: {
+              repository: {
+                pullRequest: pullRequest === undefined ? null : { id: `PR_${String(number)}` },
+              },
+            },
+          },
+        };
+      }
+      if (query.includes("mutation CmsRevertPullRequest")) {
+        const originalNumber = Number(String(variables.pullRequestId).replace("PR_", ""));
+        const original = this.pullRequests.find(
+          (candidate) => candidate.number === originalNumber,
+        );
+        const before = this.mergedBefore.get(originalNumber);
+        if (original === undefined || before === undefined) throw { status: 422 };
+        const base = (original.base as { ref: string }).ref;
+        const branch = `revert-${String(originalNumber)}`;
+        this.refs.set(branch, before);
+        const number = this.pullRequests.length + 1;
+        const pullRequest = {
+          number,
+          html_url: `https://github.example.test/pull/${String(number)}`,
+          state: "open",
+          merged_at: null,
+          head: { ref: branch },
+          base: { ref: base },
+        };
+        this.pullRequests.push(pullRequest);
+        return {
+          data: {
+            data: {
+              revertPullRequest: {
+                revertPullRequest: {
+                  number,
+                  url: pullRequest.html_url,
+                  headRefName: branch,
+                  baseRefName: base,
+                  state: "OPEN",
+                  merged: false,
+                },
+              },
+            },
+          },
+        };
+      }
+    }
     throw new Error(`Unhandled fixture route: ${route}`);
   }
 }
@@ -248,5 +331,205 @@ describe("GitHub Git Data adapter contract", () => {
         .map((result) => `${result.name}: ${result.details ?? "failed"}`)
         .join("\n"),
     ).toBe(true);
+  });
+});
+
+describe("GitHub review adapter contract", () => {
+  it("persists comments, resolved markers, reviewer assignment and checks", async () => {
+    const comments: Record<string, unknown>[] = [];
+    let requestedUsers: string[] = [];
+    let requestedTeams: string[] = [];
+    const requester: GitHubRequester = {
+      async request(route, parameters) {
+        if (route === "POST /repos/{owner}/{repo}/issues/{issue_number}/comments") {
+          const comment = {
+            id: comments.length + 1,
+            body: parameters.body,
+            created_at: "2026-07-27T12:00:00.000Z",
+            user: { login: "contract-reviewer" },
+          };
+          comments.push(comment);
+          return { data: comment };
+        }
+        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments") {
+          return { data: comments };
+        }
+        if (route === "GET /repos/{owner}/{repo}/issues/comments/{comment_id}") {
+          return {
+            data: comments.find(
+              (comment) => String(comment.id) === String(parameters.comment_id),
+            ),
+          };
+        }
+        if (route === "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}") {
+          const index = comments.findIndex(
+            (comment) => String(comment.id) === String(parameters.comment_id),
+          );
+          const current = comments[index];
+          if (current === undefined) throw new Error("comment missing");
+          const updated = { ...current, body: parameters.body };
+          comments[index] = updated;
+          return { data: updated };
+        }
+        if (route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
+          requestedUsers = parameters.reviewers as string[];
+          requestedTeams = parameters.team_reviewers as string[];
+          return { data: {} };
+        }
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+          return {
+            data: {
+              requested_reviewers: requestedUsers.map((login) => ({ login })),
+              requested_teams: requestedTeams.map((slug) => ({ slug })),
+            },
+          };
+        }
+        if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
+          return {
+            data: {
+              check_runs: [
+                {
+                  name: "cms-contract",
+                  status: "completed",
+                  conclusion: "success",
+                  html_url: "https://github.example.test/checks/1",
+                },
+              ],
+            },
+          };
+        }
+        throw new Error(`Unexpected route: ${route}`);
+      },
+    };
+    const results = await ReviewPortContract({
+      review: new GitHubReviewPort({
+        requester,
+        owner: "DMTcorp",
+        repository: "fixture",
+      }),
+      pullRequestNumber: 1,
+      ref: "a".repeat(40) as GitCommitSha,
+    });
+    expect(
+      contractPassed(results),
+      results
+        .filter((result) => !result.passed)
+        .map((result) => `${result.name}: ${result.details ?? "failed"}`)
+        .join("\n"),
+    ).toBe(true);
+    expect(String(comments[0]?.body)).toContain("<!-- cms-resolved -->");
+  });
+});
+
+describe("GitHub user identity adapter", () => {
+  it("uses the Enterprise API base URL and resolves repository capabilities plus teams", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/user")) {
+        return Response.json({ id: 42, login: "ada", name: "Ada Lovelace" });
+      }
+      if (url.includes("/repos/DMTcorp/content")) {
+        return Response.json({ permissions: { push: true, maintain: false } });
+      }
+      if (url.includes("/user/teams")) {
+        return Response.json([
+          { slug: "editors", organization: { login: "DMTcorp" } },
+          { slug: "external", organization: { login: "OtherOrg" } },
+        ]);
+      }
+      return new Response(null, { status: 404 });
+    });
+    const provider = new GitHubIdentityProvider({
+      owner: "DMTcorp",
+      repository: "content",
+      baseUrl: "https://github.enterprise.test/api/v3",
+      fetch: fetcher,
+    });
+
+    await expect(provider.resolve("user-token")).resolves.toEqual({
+      externalId: "42",
+      login: "ada",
+      displayName: "Ada Lovelace",
+      capabilities: { push: true, maintain: false },
+      teams: ["DMTcorp/editors"],
+    });
+    expect(
+      fetcher.mock.calls.every(([request]) => {
+        const url =
+          typeof request === "string"
+            ? request
+            : request instanceof URL
+              ? request.href
+              : request.url;
+        return url.startsWith("https://github.enterprise.test/api/v3/");
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("GitHub organization provisioning adapter", () => {
+  it("lists members and teams, sends invitations, and assigns team membership", async () => {
+    const calls: { readonly route: string; readonly parameters: Readonly<Record<string, unknown>> }[] =
+      [];
+    const requester: GitHubRequester = {
+      async request(route, parameters) {
+        calls.push({ route, parameters });
+        if (route === "GET /orgs/{org}/members") {
+          return { data: [{ id: 42, login: "ada", avatar_url: "https://avatars.test/42" }] };
+        }
+        if (route === "GET /orgs/{org}/memberships/{username}") {
+          return { data: { role: "admin", state: "active" } };
+        }
+        if (route === "GET /orgs/{org}/teams") {
+          return {
+            data: [{ id: 7, slug: "editors", name: "Editors", description: "CMS editors" }],
+          };
+        }
+        if (route === "POST /orgs/{org}/invitations") {
+          return { data: { id: 99, email: parameters.email } };
+        }
+        if (route === "PUT /orgs/{org}/teams/{team_slug}/memberships/{username}") {
+          return { data: { state: "active", role: parameters.role } };
+        }
+        throw new Error(`Unexpected route ${route}`);
+      },
+    };
+    const provisioning = new GitHubTeamProvisioning({
+      requester,
+      organization: "DMTcorp",
+    });
+    await expect(provisioning.listMembers()).resolves.toEqual([
+      {
+        id: "42",
+        login: "ada",
+        displayName: "ada",
+        avatarUrl: "https://avatars.test/42",
+        organizationRole: "admin",
+      },
+    ]);
+    await expect(provisioning.listTeams()).resolves.toEqual([
+      { id: "7", slug: "editors", name: "Editors", description: "CMS editors" },
+    ]);
+    await expect(
+      provisioning.invite({ email: "grace@example.test", role: "direct_member" }),
+    ).resolves.toMatchObject({
+      id: "99",
+      email: "grace@example.test",
+      status: "pending",
+    });
+    await provisioning.addMemberToTeam({
+      teamSlug: "editors",
+      username: "grace",
+      role: "member",
+    });
+    expect(calls.at(-1)).toMatchObject({
+      route: "PUT /orgs/{org}/teams/{team_slug}/memberships/{username}",
+      parameters: {
+        org: "DMTcorp",
+        team_slug: "editors",
+        username: "grace",
+        role: "member",
+      },
+    });
   });
 });

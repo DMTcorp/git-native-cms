@@ -40,6 +40,17 @@ Create `main`, branch `staging` from it, and commit the generated `.cms` directo
 `content/` documents. Protect both branches. Editors do not need personal access tokens: the
 server uses a GitHub App installation and users sign in through GitHub OAuth with PKCE.
 
+Create and install the private App without copying a manifest secret by hand:
+
+```bash
+pnpm cms github setup --origin https://YOUR_ORIGIN --owner YOUR_ORGANIZATION
+```
+
+The command starts a loopback callback, opens GitHub's one-time manifest form, converts the
+returned code, opens the installation page and writes server-only credentials to
+`.env.cms.local` with mode `0600`. GitHub only shows the generated client secret and private key
+once; if the callback expires, rerun the command and create new credentials.
+
 The GitHub App needs:
 
 | Repository permission | Access         |
@@ -47,10 +58,14 @@ The GitHub App needs:
 | Contents              | Read and write |
 | Pull requests         | Read and write |
 | Issues                | Read and write |
-| Checks                | Read           |
+| Checks                | Read and write |
+| Deployments           | Read and write |
 | Metadata              | Read           |
+| Members               | Read and write |
 
-Subscribe to `check_run`, `pull_request`, and `push`. Set the OAuth callback to
+Subscribe to `check_run`, `check_suite`, `pull_request`, `pull_request_review`,
+`pull_request_review_comment`, `push`, `deployment`, `deployment_status`, `installation` and
+`installation_repositories`. Set the OAuth callback to
 `https://YOUR_ORIGIN/api/cms/auth/github/callback` and the webhook to
 `https://YOUR_ORIGIN/api/cms/webhooks/github`. Install the App only on the content repository.
 

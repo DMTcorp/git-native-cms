@@ -17,6 +17,11 @@ Content-Type: application/json
 The machine actor is intentionally mapped to the `editor` role. It can create a Change and obtain
 a preview, but cannot approve, stage, publish or rollback by token alone.
 
+`list_conflicts` exposes the same semantic base/Change/Staging comparison as the review panel.
+`resolve_conflicts` requires an explicit choice for every path and delegates to the application
+handler, so it resets an existing approval and records `source: mcp` in the audit trail exactly
+like the UI transport.
+
 Destructive tools require both the normal actor permission and a short-lived confirmation token
 for the exact action. Confirmation tokens are encrypted, actor-bound, expire quickly and are
 single-use. Every command audit event records `source: mcp`.

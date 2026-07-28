@@ -7,7 +7,7 @@ import {
   resolveRedirect,
 } from "@git-native-cms/delivery";
 import { materializeLocalizedValue, type LocalizedDocument } from "@git-native-cms/localization";
-import { sandboxDocument } from "./cms.fixture";
+import { sandboxContentDocuments, sandboxDocument } from "./cms.fixture";
 
 interface PublishedPage extends CmsPageDocument {
   readonly title?: string;
@@ -45,6 +45,19 @@ function fallbackPage(): PublishedPage {
     id: sandboxDocument.id,
     ...sandboxDocument.data,
   };
+}
+
+function fallbackContent(): readonly RenderContentDocument[] {
+  return sandboxContentDocuments
+    .filter((document) => document.type !== "pages")
+    .map((document) => ({
+      id: document.id,
+      type: document.type,
+      data:
+        typeof document.data === "object" && document.data !== null && !Array.isArray(document.data)
+          ? (document.data as Readonly<Record<string, unknown>>)
+          : { value: document.data },
+    }));
 }
 
 export async function loadPublishedPage(locale = "en-US"): Promise<PublishedPage> {
@@ -93,7 +106,9 @@ export async function loadPublishedSite(locale = "en-US"): Promise<{
 }> {
   const page = await loadPublishedPage(locale);
   const baseUrl = process.env.CMS_PUBLIC_RELEASES_URL;
-  if (baseUrl === undefined || baseUrl.length === 0) return { page, content: [] };
+  if (baseUrl === undefined || baseUrl.length === 0) {
+    return { page, content: fallbackContent() };
+  }
   const client = createContentClient({
     environment: "production",
     source: cdnSource({ baseUrl }),

@@ -252,6 +252,47 @@ const approved = await api<{ readonly revision: string }>(
   },
   approvalKey,
 );
+const inspectedConflicts = await api<{
+  readonly conflicts: readonly {
+    readonly documentId: string;
+    readonly path: string;
+  }[];
+}>(editorSession, "GET", `changes/${change.id}/conflicts`);
+const stagingRevision =
+  inspectedConflicts.conflicts.length === 0
+    ? approved.revision
+    : (
+        await api<{ readonly revision: string }>(
+          editorSession,
+          "POST",
+          `changes/${change.id}/conflicts/resolve`,
+          {
+            expectedRevision: approved.revision,
+            resolutions: inspectedConflicts.conflicts.map((conflict) => ({
+              documentId: conflict.documentId,
+              path: conflict.path,
+              choice: "change",
+            })),
+            idempotencyKey: `live:${runId}:resolve-conflicts`,
+          },
+          `live:${runId}:resolve-conflicts`,
+        )
+      ).revision;
+const stagingApproval =
+  inspectedConflicts.conflicts.length === 0
+    ? approved
+    : await api<{ readonly revision: string }>(
+        reviewerSession,
+        "POST",
+        `changes/${change.id}/approve`,
+        {
+          pullRequestNumber: submitted.pullRequest.number,
+          expectedRevision: stagingRevision,
+          body: "Re-approved after resolving semantic conflicts against current Staging.",
+          idempotencyKey: `live:${runId}:reapprove`,
+        },
+        `live:${runId}:reapprove`,
+      );
 const stagingKey = `live:${runId}:staging`;
 const staged = await api<{ readonly revision: string }>(
   reviewerSession,
@@ -259,7 +300,7 @@ const staged = await api<{ readonly revision: string }>(
   `changes/${change.id}/staging`,
   {
     pullRequestNumber: submitted.pullRequest.number,
-    expectedRevision: approved.revision,
+    expectedRevision: stagingApproval.revision,
     idempotencyKey: stagingKey,
   },
   stagingKey,

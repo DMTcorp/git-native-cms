@@ -1,24 +1,58 @@
 import type {
   Asset,
+  AuditEvent,
   AssetStore,
   EnvironmentPointer,
   Page,
+  ReviewComment,
   ReleaseStore,
   SessionRecord,
   SessionStore,
   StoredRelease,
 } from "@git-native-cms/application";
-import type { Actor, AssetId, ReleaseId } from "@git-native-cms/core";
-import { MemoryGitProvider } from "@git-native-cms/testing";
+import type {
+  Actor,
+  AssetId,
+  ContentDocument,
+  DocumentId,
+  GitCommitSha,
+  ReleaseId,
+  Revision,
+} from "@git-native-cms/core";
+import {
+  DeterministicIds,
+  FixedClock,
+  MemoryAuditSink,
+  MemoryContentRepository,
+  MemoryGitProvider,
+  MemoryIdempotencyStore,
+} from "@git-native-cms/testing";
 import { describe, expect, it } from "vitest";
 import {
   AssetStoreContract,
+  AssetProcessorPortContract,
+  AssetUsagePortContract,
+  AuditSinkContract,
+  ClockContract,
   contractPassed,
+  ContentRepositoryContract,
+  DeploymentPortContract,
   FrameworkAdapterContract,
   GitProviderContract,
+  IdentityProviderContract,
+  IdempotencyStoreContract,
+  IdGeneratorContract,
+  PublicationNotifierPortContract,
+  RateLimitPortContract,
+  ReleaseBuilderPortContract,
   ReleaseStoreContract,
+  RevalidationPortContract,
+  ReviewPortContract,
+  SchedulerPortContract,
   RendererContract,
   SessionStoreContract,
+  TranslationProviderContract,
+  WebhookReplayStoreContract,
 } from "./contracts.js";
 
 const actor: Actor = {
@@ -69,6 +103,23 @@ class ContractAssetStore implements AssetStore {
 
   async readAsset(id: AssetId): Promise<Asset | undefined> {
     return this.assets.get(id);
+  }
+
+  async updateAssetMetadata(
+    input: Parameters<AssetStore["updateAssetMetadata"]>[0],
+  ): Promise<Asset> {
+    const current = this.assets.get(input.id);
+    if (current === undefined) throw new Error("asset missing");
+    const stable = { ...current };
+    delete stable.altText;
+    delete stable.focalPoint;
+    const asset: Asset = {
+      ...stable,
+      ...(input.altText === undefined ? {} : { altText: input.altText }),
+      ...(input.focalPoint === undefined ? {} : { focalPoint: input.focalPoint }),
+    };
+    this.assets.set(asset.id, asset);
+    return asset;
   }
 
   async deleteAsset(id: AssetId): Promise<void> {
@@ -204,5 +255,224 @@ describe("shared adapter contracts", () => {
       }),
     );
     expectContract(await RendererContract({ render: () => "<main>Published content</main>" }));
+  });
+
+  it("exercises every remaining application capability port", async () => {
+    const revision = "rev_contract" as Revision;
+    const document: ContentDocument = {
+      id: "doc_contract" as DocumentId,
+      type: "pages",
+      schemaVersion: 1,
+      revision,
+      data: { title: "Contract" },
+    };
+    expectContract(
+      await ContentRepositoryContract({
+        repository: new MemoryContentRepository(),
+        ref: "contract/content",
+        expectedRevision: revision,
+        document,
+        actor,
+      }),
+    );
+
+    const comments: ReviewComment[] = [];
+    let reviewers = { users: [] as string[], teams: [] as string[] };
+    expectContract(
+      await ReviewPortContract({
+        review: {
+          async addComment(input) {
+            const comment = {
+              id: `comment-${String(comments.length + 1)}`,
+              author: actor.login,
+              body: input.body,
+              createdAt: "2026-07-27T12:00:00.000Z",
+              resolved: false,
+            };
+            comments.push(comment);
+            return comment;
+          },
+          async listComments() {
+            return comments;
+          },
+          async resolveComment(input) {
+            const index = comments.findIndex((comment) => comment.id === input.commentId);
+            const current = comments[index];
+            if (current === undefined) throw new Error("comment missing");
+            const updated = { ...current, resolved: input.resolved };
+            comments[index] = updated;
+            return updated;
+          },
+          async assignReviewers(input) {
+            reviewers = { users: [...input.users], teams: [...input.teams] };
+            return reviewers;
+          },
+          async listReviewers() {
+            return reviewers;
+          },
+          async listChecks() {
+            return [
+              { name: "contract", status: "completed", conclusion: "success", required: true },
+            ];
+          },
+        },
+        pullRequestNumber: 1,
+        ref: "a".repeat(40) as GitCommitSha,
+      }),
+    );
+
+    const releaseId = "rel_contract_builder" as ReleaseId;
+    expectContract(
+      await ReleaseBuilderPortContract({
+        builder: {
+          async build() {
+            return {
+              id: releaseId,
+              manifest: { releaseId },
+              files: { "manifest.json": "{}", "checksums.json": "{}" },
+            };
+          },
+        },
+        gitCommit: "b".repeat(40) as GitCommitSha,
+        registryDigest: `sha256:${"c".repeat(64)}`,
+      }),
+    );
+    const asset: Asset = {
+      id: "ast_contract" as AssetId,
+      fileName: "contract.png",
+      mimeType: "image/png",
+      size: 8,
+      checksum: "d".repeat(64),
+      url: "https://assets.example.test/contract.png",
+    };
+    expectContract(
+      await AssetUsagePortContract({
+        usage: {
+          async usages() {
+            return ["content/pages/contract.yaml"];
+          },
+          async isReleased() {
+            return true;
+          },
+        },
+        assetId: asset.id,
+        expectedPath: "content/pages/contract.yaml",
+        released: true,
+      }),
+    );
+    expectContract(
+      await AssetProcessorPortContract({
+        processor: {
+          async process(value) {
+            return value;
+          },
+        },
+        asset,
+      }),
+    );
+
+    const deployments = new Map<string, { deploymentId: string; url: string }>();
+    expectContract(
+      await DeploymentPortContract({
+        deployment: {
+          async deploy(input) {
+            const result = deployments.get(input.idempotencyKey) ?? {
+              deploymentId: "deployment-contract",
+              url: "https://deployment.example.test",
+            };
+            deployments.set(input.idempotencyKey, result);
+            return result;
+          },
+        },
+        releaseId,
+        revision: "e".repeat(40) as GitCommitSha,
+      }),
+    );
+    expectContract(await RevalidationPortContract({ revalidation: { async revalidate() {} } }));
+    expectContract(
+      await PublicationNotifierPortContract({
+        notifier: { async notify() {} },
+        releaseId,
+        revision: "f".repeat(40) as GitCommitSha,
+      }),
+    );
+
+    expectContract(
+      await TranslationProviderContract({
+        provider: {
+          async createJob() {
+            return { jobId: "translation-contract" };
+          },
+          async readJob() {
+            return { status: "complete", xliff: '<xliff version="2.0"></xliff>' };
+          },
+        },
+      }),
+    );
+    const deliveries = new Set<string>();
+    expectContract(
+      await WebhookReplayStoreContract({
+        store: {
+          async claim(deliveryId) {
+            if (deliveries.has(deliveryId)) return false;
+            deliveries.add(deliveryId);
+            return true;
+          },
+        },
+      }),
+    );
+    let consumed = false;
+    expectContract(
+      await RateLimitPortContract({
+        rateLimit: {
+          async consume() {
+            const allowed = !consumed;
+            consumed = true;
+            return {
+              allowed,
+              remaining: 0,
+              resetAt: "2026-07-27T12:01:00.000Z",
+            };
+          },
+        },
+      }),
+    );
+    expectContract(
+      await SchedulerPortContract({
+        scheduler: {
+          workflow(input) {
+            return {
+              path: `.github/workflows/${input.scheduleId}.yaml`,
+              content: JSON.stringify(input),
+            };
+          },
+        },
+      }),
+    );
+    expectContract(await IdempotencyStoreContract({ store: new MemoryIdempotencyStore() }));
+    const audit = new MemoryAuditSink();
+    expectContract(
+      await AuditSinkContract({
+        sink: audit,
+        readEvents: async (): Promise<readonly AuditEvent[]> => audit.events,
+      }),
+    );
+    expectContract(
+      await IdentityProviderContract({
+        provider: {
+          async resolve() {
+            return {
+              externalId: "42",
+              login: "contract",
+              displayName: "Contract User",
+              capabilities: { push: true },
+              teams: ["DMTcorp/editors"],
+            };
+          },
+        },
+      }),
+    );
+    expectContract(await ClockContract({ clock: new FixedClock() }));
+    expectContract(await IdGeneratorContract({ ids: new DeterministicIds() }));
   });
 });

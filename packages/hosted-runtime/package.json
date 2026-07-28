@@ -42,6 +42,7 @@
     "@git-native-cms/release-builder": "workspace:*",
     "@git-native-cms/react": "workspace:*",
     "@git-native-cms/search": "workspace:*",
+    "@git-native-cms/schema": "workspace:*",
     "@git-native-cms/server": "workspace:*",
     "@git-native-cms/sessions": "workspace:*",
     "jose": "catalog:",

@@ -102,6 +102,30 @@ body {
   font-family: "IBM Plex Mono", monospace;
 }
 
+.hero__media {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid #cbd3dc;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 20px 55px rgb(23 33 43 / 12%);
+}
+
+.hero__media img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.hero__media figcaption {
+  padding: 10px 12px;
+  color: #627080;
+  font:
+    700 10px/1.2 "IBM Plex Mono",
+    monospace;
+}
+
 @media (max-width: 760px) {
   .hero {
     grid-template-columns: 1fr;

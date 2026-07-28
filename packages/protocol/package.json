@@ -15,6 +15,10 @@
     "./preview": {
       "types": "./dist/preview.d.ts",
       "import": "./dist/preview.js"
+    },
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "import": "./dist/http.js"
     }
   },
   "dependencies": {

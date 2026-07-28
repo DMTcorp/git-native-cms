@@ -17,6 +17,7 @@ export async function createGitHubOAuthAttempt(input: {
   readonly clientId: string;
   readonly callbackUrl: string;
   readonly scopes?: readonly string[];
+  readonly authorizationBaseUrl?: string;
   readonly now?: Date;
 }): Promise<OAuthAttempt> {
   const verifier = base64Url(globalThis.crypto.getRandomValues(new Uint8Array(48)));
@@ -26,7 +27,7 @@ export async function createGitHubOAuthAttempt(input: {
     ),
   );
   const state = base64Url(globalThis.crypto.getRandomValues(new Uint8Array(32)));
-  const url = new URL("https://github.com/login/oauth/authorize");
+  const url = new URL("/login/oauth/authorize", input.authorizationBaseUrl ?? "https://github.com");
   url.searchParams.set("client_id", input.clientId);
   url.searchParams.set("redirect_uri", input.callbackUrl);
   url.searchParams.set("state", state);
@@ -98,11 +99,12 @@ export async function exchangeGitHubOAuthCode(input: {
   readonly code: string;
   readonly verifier: string;
   readonly redirectUri: string;
+  readonly oauthBaseUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly signal?: AbortSignal;
 }): Promise<GitHubOAuthToken> {
   const response = await (input.fetch ?? globalThis.fetch)(
-    "https://github.com/login/oauth/access_token",
+    new URL("/login/oauth/access_token", input.oauthBaseUrl ?? "https://github.com").toString(),
     {
       method: "POST",
       headers: {
@@ -139,12 +141,13 @@ export async function revokeGitHubOAuthToken(input: {
   readonly clientId: string;
   readonly clientSecret: string;
   readonly accessToken: string;
+  readonly apiBaseUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly signal?: AbortSignal;
 }): Promise<void> {
   const authorization = btoa(`${input.clientId}:${input.clientSecret}`);
   const response = await (input.fetch ?? globalThis.fetch)(
-    `https://api.github.com/applications/${encodeURIComponent(input.clientId)}/token`,
+    `${(input.apiBaseUrl ?? "https://api.github.com").replace(/\/$/u, "")}/applications/${encodeURIComponent(input.clientId)}/token`,
     {
       method: "DELETE",
       headers: {

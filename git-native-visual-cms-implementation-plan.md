@@ -1107,6 +1107,36 @@ interface AssetStore {
 }
 ```
 
+Asset storage jest capability niezależnym od repozytorium contentowego i release storage. Produkcyjnie
+korzysta z osobnego bucketu/prefixu oraz osobnego publicznego originu. Dokumenty nie zapisują kopii
+pliku ani tymczasowego signed URL, tylko stabilną referencję:
+
+```ts
+interface AssetReference {
+  readonly id: AssetId;
+  readonly url: string;
+  readonly mimeType: string;
+  readonly fileName: string;
+  readonly altText?: string;
+}
+```
+
+Editor udostępnia pełną galerię assetów:
+
+- przeglądanie miniaturek i plików z paginacją;
+- wyszukiwanie po nazwie, typie i alt text;
+- filtrowanie zgodne z `fields.asset({ accept })`;
+- bezpośredni upload do storage oraz bezpieczne finalizowanie;
+- wybór istniejącego assetu z inspectora sekcji/bloku;
+- natychmiastową aktualizację preview przez ten sam patch stream;
+- podgląd wariantów, wymiarów, rozmiaru i usage graph;
+- usunięcie tylko wtedy, gdy asset nie jest używany przez Change ani immutable release;
+- pełną obsługę klawiatury, focus management i czytelny empty/error state.
+
+Każde pole sekcji lub content type zadeklarowane jako `fields.asset()` renderuje asset picker.
+Picker zapisuje `AssetReference` pod właściwą ścieżką RFC 6901, więc wybór media działa jednakowo
+dla zwykłych bloków, Reusable Blocks, Globals i dokumentów kolekcji.
+
 Providerzy:
 
 - local filesystem;
@@ -2793,7 +2823,13 @@ To nie jest redukcja scope’u. Jest to kolejność budowania kompletnego system
 - variants;
 - image pipeline;
 - usage graph;
+- storage-backed asset gallery;
+- schema-driven media picker dla bloków i content types;
 - asset UI.
+
+Gate: upload do osobnego storage → asset pojawia się w galerii → pole `fields.asset()` filtruje
+kompatybilne media → wybór aktualizuje preview bez reloadu → zapis Change utrwala stabilną
+referencję → użyty lub opublikowany asset nie może zostać usunięty.
 
 ## Etap 9 — SEO/i18n/search
 

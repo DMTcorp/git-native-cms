@@ -7,8 +7,12 @@ A Change starts from the exact `main` SHA and gets an isolated `cms/<actor>/<cha
 Every save uses Git Data compare-and-swap and includes `Change-ID` metadata.
 
 Sending for review opens a pull request. Semantic field changes, live visual baseline, comments,
-required checks and merge conflicts are shown in the workspace. Approval records the reviewer;
-adding to staging squash-merges the Change, deletes its branch and keeps the audit record.
+required checks and merge conflicts are shown in the workspace. When Staging and the Change edit
+the same field, the review panel shows both values. Resolve every field by choosing **Keep this
+Change** or **Use Staging**. The CMS carries over non-conflicting Staging edits, writes the merged
+documents with compare-and-swap, records an audit event and resets the previous approval so the
+actual merged result is reviewed. Approval records the reviewer; adding to staging squash-merges
+the Change, deletes its branch and keeps the audit record.
 
 Staging is a batch. Publication:
 

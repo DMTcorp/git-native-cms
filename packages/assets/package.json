@@ -11,6 +11,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    },
+    "./git": {
+      "types": "./dist/git.d.ts",
+      "import": "./dist/git.js"
     }
   },
   "dependencies": {
@@ -21,6 +29,7 @@
   },
   "devDependencies": {
     "@git-native-cms/adapter-kit": "workspace:*",
+    "@git-native-cms/testing": "workspace:*",
     "testcontainers": "catalog:"
   },
   "scripts": {

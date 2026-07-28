@@ -20,6 +20,8 @@ import {
   ReleaseBuilderPortContract,
   ReleaseStoreContract,
   SessionStoreContract,
+  PreviewSessionPortContract,
+  TeamProvisioningPortContract,
   DeploymentPortContract,
   RevalidationPortContract,
   PublicationNotifierPortContract,

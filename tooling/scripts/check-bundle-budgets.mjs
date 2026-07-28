@@ -64,6 +64,12 @@ if (bridgeBytes > 35 * 1024) {
 }
 
 const { applyPatches } = await import(new URL("packages/document-model/dist/index.js", root).href);
+const { buildReferenceGraph, buildSearchIndex, search } = await import(
+  new URL("packages/search/dist/index.js", root).href
+);
+const { buildRelease } = await import(
+  new URL("packages/release-builder/dist/index.js", root).href
+);
 const largePage = {
   title: "Performance fixture",
   sections: Array.from({ length: 100 }, (_, index) => ({
@@ -97,6 +103,87 @@ if (typingP95 > 50) {
   throw new Error(`Document patch typing p95 is ${typingP95.toFixed(2)} ms; budget is 50 ms.`);
 }
 
+const catalog = Array.from({ length: 10_000 }, (_, index) => ({
+  id: `doc-${index}`,
+  type: index % 2 === 0 ? "pages" : "posts",
+  title: `Field note ${index}`,
+  path: `/notes/${index}`,
+  value: {
+    slug: `field-note-${index}`,
+    summary: `A searchable editorial record for campaign ${index % 100}.`,
+    ...(index === 0 ? {} : { ref: `doc-${index - 1}` }),
+  },
+}));
+const searchStarted = performance.now();
+const index = buildSearchIndex(catalog);
+const graph = buildReferenceGraph(catalog);
+const hits = search(index, "campaign 42");
+const searchDuration = performance.now() - searchStarted;
+if (hits.length === 0 || graph.edges.length !== catalog.length - 1) {
+  throw new Error("Large-catalog search or reference graph returned incomplete results.");
+}
+if (searchDuration > 5_000) {
+  throw new Error(
+    `10,000-entry search and graph build took ${searchDuration.toFixed(2)} ms; budget is 5000 ms.`,
+  );
+}
+
+const assetCatalog = Array.from({ length: 10_000 }, (_, index) => ({
+  id: `ast-${index}`,
+  fileName: `campaign-${index}.webp`,
+  mimeType: "image/webp",
+  checksum: index.toString(16).padStart(64, "0"),
+}));
+const assetFilterStarted = performance.now();
+const matchingAssets = assetCatalog.filter(
+  (asset) =>
+    asset.fileName.includes("campaign-999") ||
+    asset.mimeType.includes("campaign-999") ||
+    asset.checksum.includes("campaign-999"),
+);
+const assetFilterDuration = performance.now() - assetFilterStarted;
+if (matchingAssets.length === 0 || assetFilterDuration > 250) {
+  throw new Error(
+    `10,000-entry asset filter took ${assetFilterDuration.toFixed(2)} ms; budget is 250 ms.`,
+  );
+}
+
+const releaseInput = {
+  gitCommit: "a".repeat(40),
+  configVersion: 1,
+  registryDigest: `sha256:${"b".repeat(64)}`,
+  schemaVersion: 1,
+  documents: Array.from({ length: 1_000 }, (_, index) => ({
+    path: `content/pages/page-${index}/index.json`,
+    value: {
+      id: `doc-${index}`,
+      type: "pages",
+      schemaVersion: 1,
+      title: `Page ${index}`,
+      sections: [{ id: `section-${index}`, type: "feature", heading: `Page ${index}` }],
+    },
+    tags: [`page:${index}`],
+  })),
+};
+const releaseStarted = performance.now();
+const firstRelease = await buildRelease(releaseInput);
+const secondRelease = await buildRelease({
+  ...releaseInput,
+  documents: [...releaseInput.documents].reverse(),
+});
+const releaseDuration = performance.now() - releaseStarted;
+if (
+  firstRelease.id !== secondRelease.id ||
+  JSON.stringify(firstRelease.files) !== JSON.stringify(secondRelease.files)
+) {
+  throw new Error("A 1,000-document release is not reproducible across input ordering.");
+}
+if (releaseDuration > 10_000) {
+  throw new Error(
+    `Two 1,000-document release builds took ${releaseDuration.toFixed(2)} ms; budget is 10000 ms.`,
+  );
+}
+
 process.stdout.write(
-  `Bundle budgets passed: public editor runtime 0 B, editor ${editorBytes} B gzip, bridge ${bridgeBytes} B gzip, typing p95 ${typingP95.toFixed(2)} ms (100 sections).\n`,
+  `Bundle and scale budgets passed: public editor runtime 0 B, editor ${editorBytes} B gzip, bridge ${bridgeBytes} B gzip, typing p95 ${typingP95.toFixed(2)} ms (100 sections), search+graph ${searchDuration.toFixed(2)} ms (10,000 entries), asset filter ${assetFilterDuration.toFixed(2)} ms (10,000 assets), reproducible release ${releaseDuration.toFixed(2)} ms (2 × 1,000 documents).\n`,
 );

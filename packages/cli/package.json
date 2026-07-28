@@ -21,7 +21,8 @@
     "@git-native-cms/integrations": "workspace:*",
     "@git-native-cms/mcp": "workspace:*",
     "@git-native-cms/migrations": "workspace:*",
-    "@git-native-cms/release-builder": "workspace:*"
+    "@git-native-cms/release-builder": "workspace:*",
+    "typescript": "^6.0.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

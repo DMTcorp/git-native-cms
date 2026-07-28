@@ -1,4 +1,9 @@
-import type { EnvironmentPointer, ReleaseStore, StoredRelease } from "@git-native-cms/application";
+import type {
+  EnvironmentPointer,
+  GitProvider,
+  ReleaseStore,
+  StoredRelease,
+} from "@git-native-cms/application";
 import { canonicalJson } from "@git-native-cms/content-codecs";
 import { CmsError, type ReleaseId } from "@git-native-cms/core";
 import type { S3Client } from "@aws-sdk/client-s3";
@@ -23,6 +28,34 @@ export interface ContentIndexEntry {
   readonly type: string;
   readonly title: string;
   readonly path: string;
+}
+
+export interface DeliveryWindow {
+  readonly from?: string;
+  readonly until?: string;
+}
+
+function deliveryWindow(value: unknown): DeliveryWindow | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Readonly<Record<string, unknown>>;
+  return {
+    ...(typeof record.from === "string" ? { from: record.from } : {}),
+    ...(typeof record.until === "string" ? { until: record.until } : {}),
+  };
+}
+
+export function isContentActive(
+  data: Readonly<Record<string, unknown>>,
+  now: Date = new Date(),
+): boolean {
+  const timestamp = now.getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  for (const field of ["availability", "visibilitySchedule"] as const) {
+    const window = deliveryWindow(data[field]);
+    if (window?.from !== undefined && new Date(window.from).getTime() > timestamp) return false;
+    if (window?.until !== undefined && new Date(window.until).getTime() <= timestamp) return false;
+  }
+  return true;
 }
 
 export async function loadRedirects(
@@ -91,10 +124,30 @@ export async function loadContentGraph(
   });
 }
 
+export async function loadActiveContentGraph(
+  client: ContentClient,
+  input: { readonly now?: Date; readonly signal?: AbortSignal } = {},
+): Promise<
+  readonly {
+    readonly id: string;
+    readonly type: string;
+    readonly data: Readonly<Record<string, unknown>>;
+  }[]
+> {
+  const graph = await loadContentGraph(client, input.signal);
+  return graph.filter((document) => isContentActive(document.data, input.now));
+}
+
 export function createContentClient(input: {
   readonly environment: "preview" | "staging" | "production";
   readonly source: ContentSource;
   readonly fallbackReleaseId?: ReleaseId;
+  readonly onStaleFallback?: (input: {
+    readonly failedReleaseId: ReleaseId;
+    readonly fallbackReleaseId: ReleaseId;
+    readonly path: string;
+    readonly cause: unknown;
+  }) => void;
 }): ContentClient {
   let pointer: Promise<ReleaseId> | undefined;
   const fileCache = new Map<string, Promise<unknown>>();
@@ -125,6 +178,25 @@ export function createContentClient(input: {
         return (await pending) as TValue;
       } catch (cause) {
         fileCache.delete(key);
+        if (input.fallbackReleaseId !== undefined && input.fallbackReleaseId !== releaseId) {
+          try {
+            const fallbackSource = await input.source.readFile(
+              input.fallbackReleaseId,
+              path,
+              signal,
+            );
+            const fallback = JSON.parse(fallbackSource) as TValue;
+            input.onStaleFallback?.({
+              failedReleaseId: releaseId,
+              fallbackReleaseId: input.fallbackReleaseId,
+              path,
+              cause,
+            });
+            return fallback;
+          } catch {
+            // Preserve the primary delivery error below.
+          }
+        }
         throw new CmsError({
           code: "CMS_DELIVERY_001",
           message: `Content ${path} could not be loaded.`,
@@ -147,21 +219,178 @@ export function cdnSource(input: {
 }): ContentSource {
   const fetcher = input.fetch ?? globalThis.fetch;
   const baseUrl = input.baseUrl.replace(/\/$/, "");
+  const cached = new Map<string, { readonly etag?: string; readonly body: string }>();
+  async function read(url: string, cache: RequestCache, signal?: AbortSignal): Promise<string> {
+    const previous = cached.get(url);
+    const response = await fetcher(url, {
+      cache,
+      headers: previous?.etag === undefined ? {} : { "if-none-match": previous.etag },
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (response.status === 304 && previous !== undefined) return previous.body;
+    if (!response.ok) throw new Error(`Content request failed with ${response.status}.`);
+    const body = await response.text();
+    const etag = response.headers.get("etag") ?? undefined;
+    cached.set(url, { body, ...(etag === undefined ? {} : { etag }) });
+    return body;
+  }
   return {
     async readPointer(environment, signal) {
-      const response = await fetcher(`${baseUrl}/environments/${environment}/current.json`, {
-        cache: "no-store",
-        ...(signal === undefined ? {} : { signal }),
-      });
-      if (!response.ok) throw new Error(`Pointer request failed with ${response.status}.`);
-      return (await response.json()) as { releaseId: ReleaseId };
+      const body = await read(
+        `${baseUrl}/environments/${environment}/current.json`,
+        "no-store",
+        signal,
+      );
+      return JSON.parse(body) as { releaseId: ReleaseId };
     },
     async readFile(releaseId, path, signal) {
-      const response = await fetcher(`${baseUrl}/releases/${releaseId}/${path}`, {
-        cache: "force-cache",
+      return read(`${baseUrl}/releases/${releaseId}/${path}`, "force-cache", signal);
+    },
+  };
+}
+
+export function gitSource(input: {
+  readonly git: GitProvider;
+  readonly ref: string;
+  readonly pointerPrefix?: string;
+  readonly releasePrefix?: string;
+}): ContentSource {
+  const pointerPrefix = input.pointerPrefix?.replace(/^\/|\/$/gu, "") ?? ".cms/environments";
+  const releasePrefix = input.releasePrefix?.replace(/^\/|\/$/gu, "") ?? "releases";
+  return {
+    async readPointer(environment, signal) {
+      const file = await input.git.readFile({
+        ref: input.ref,
+        path: `${pointerPrefix}/${environment}/current.json`,
         ...(signal === undefined ? {} : { signal }),
       });
-      if (!response.ok) throw new Error(`Content request failed with ${response.status}.`);
+      if (file === undefined) {
+        throw new CmsError({
+          code: "CMS_DELIVERY_012",
+          message: `The ${environment} Git release pointer does not exist.`,
+          category: "storage",
+          retryable: false,
+        });
+      }
+      const pointer = JSON.parse(file.content) as { readonly releaseId?: unknown };
+      if (typeof pointer.releaseId !== "string") {
+        throw new CmsError({
+          code: "CMS_DELIVERY_014",
+          message: `The ${environment} Git release pointer is invalid.`,
+          category: "validation",
+          retryable: false,
+        });
+      }
+      return { releaseId: pointer.releaseId as ReleaseId };
+    },
+    async readFile(releaseId, path, signal) {
+      const safePath = path.replaceAll("\\", "/");
+      if (
+        safePath.startsWith("/") ||
+        safePath.split("/").some((segment) => segment === ".." || segment === ".")
+      ) {
+        throw new CmsError({
+          code: "CMS_DELIVERY_015",
+          message: `The Git delivery path "${path}" is unsafe.`,
+          category: "validation",
+          retryable: false,
+        });
+      }
+      const file = await input.git.readFile({
+        ref: input.ref,
+        path: `${releasePrefix}/${releaseId}/${safePath}`,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (file === undefined) {
+        throw new CmsError({
+          code: "CMS_DELIVERY_013",
+          message: `Git release ${releaseId} does not contain ${path}.`,
+          category: "storage",
+          retryable: false,
+        });
+      }
+      return file.content;
+    },
+  };
+}
+
+function deliveryEnvironment(value: string): EnvironmentPointer["environment"] {
+  if (value === "preview" || value === "staging" || value === "production") return value;
+  throw new CmsError({
+    code: "CMS_DELIVERY_011",
+    message: `Unknown delivery environment "${value}".`,
+    category: "validation",
+    retryable: false,
+  });
+}
+
+export function releaseStoreSource(store: ReleaseStore): ContentSource {
+  return {
+    async readPointer(environment, signal) {
+      const pointer = await store.readPointer(deliveryEnvironment(environment), signal);
+      if (pointer === undefined) {
+        throw new CmsError({
+          code: "CMS_DELIVERY_012",
+          message: `The ${environment} release pointer does not exist.`,
+          category: "storage",
+          retryable: true,
+        });
+      }
+      return { releaseId: pointer.releaseId };
+    },
+    async readFile(releaseId, path, signal) {
+      const release = await store.readRelease(releaseId, signal);
+      const source = release?.files[path];
+      if (source === undefined) {
+        throw new CmsError({
+          code: "CMS_DELIVERY_013",
+          message: `Release ${releaseId} does not contain ${path}.`,
+          category: "storage",
+          retryable: false,
+        });
+      }
+      return source;
+    },
+  };
+}
+
+export function previewSource(input: {
+  readonly baseUrl: string;
+  readonly token: string;
+  readonly fetch?: typeof globalThis.fetch;
+}): ContentSource {
+  const fetcher = input.fetch ?? globalThis.fetch;
+  const baseUrl = input.baseUrl.replace(/\/$/u, "");
+  const headers = {
+    accept: "application/json",
+    authorization: `Bearer ${input.token}`,
+  };
+  return {
+    async readPointer(environment, signal) {
+      const response = await fetcher(
+        `${baseUrl}/pointer?environment=${encodeURIComponent(environment)}`,
+        {
+          headers,
+          cache: "no-store",
+          ...(signal === undefined ? {} : { signal }),
+        },
+      );
+      if (!response.ok) throw new Error(`Preview pointer request failed with ${response.status}.`);
+      return (await response.json()) as { readonly releaseId: ReleaseId };
+    },
+    async readFile(releaseId, path, signal) {
+      const response = await fetcher(
+        `${baseUrl}/releases/${encodeURIComponent(releaseId)}/${path
+          .split("/")
+          .map(encodeURIComponent)
+          .join("/")}`,
+        {
+          headers,
+          cache: "no-store",
+          ...(signal === undefined ? {} : { signal }),
+        },
+      );
+      if (!response.ok) throw new Error(`Preview content request failed with ${response.status}.`);
       return response.text();
     },
   };

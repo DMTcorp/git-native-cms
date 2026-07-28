@@ -3,6 +3,8 @@ import type {
   DocumentSummary,
   GitProvider,
   Page,
+  ProjectConfig,
+  RegistryLock,
 } from "@git-native-cms/application";
 import { codecForPath, yamlCodec } from "@git-native-cms/content-codecs";
 import {
@@ -214,5 +216,52 @@ export class GitContentRepository implements ContentRepository {
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     return committed.sha;
+  }
+
+  async readProjectConfig(ref: string, signal?: AbortSignal): Promise<ProjectConfig> {
+    const file = await this.git.readFile({
+      ref,
+      path: ".cms/project.yaml",
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const value = file === undefined ? undefined : yamlCodec.parse(file.content);
+    if (!isRecord(value) || typeof value.configVersion !== "number") {
+      throw new CmsError({
+        code: "CMS_CONFIGURATION_004",
+        message: ".cms/project.yaml is missing or invalid.",
+        category: "configuration",
+        retryable: false,
+      });
+    }
+    return value as ProjectConfig;
+  }
+
+  async readRegistryLock(ref: string, signal?: AbortSignal): Promise<RegistryLock> {
+    const file = await this.git.readFile({
+      ref,
+      path: ".cms/registry-lock.json",
+      ...(signal === undefined ? {} : { signal }),
+    });
+    let value: unknown;
+    try {
+      value = file === undefined ? undefined : JSON.parse(file.content);
+    } catch (cause) {
+      throw new CmsError({
+        code: "CMS_CONFIGURATION_005",
+        message: ".cms/registry-lock.json contains invalid JSON.",
+        category: "configuration",
+        retryable: false,
+        cause,
+      });
+    }
+    if (!isRecord(value) || typeof value.registryDigest !== "string") {
+      throw new CmsError({
+        code: "CMS_CONFIGURATION_005",
+        message: ".cms/registry-lock.json is missing or invalid.",
+        category: "configuration",
+        retryable: false,
+      });
+    }
+    return value as RegistryLock;
   }
 }

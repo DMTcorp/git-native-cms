@@ -1,4 +1,9 @@
-import { S3Client } from "@aws-sdk/client-s3";
+import {
+  CopyObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import type { Actor, AssetId } from "@git-native-cms/core";
 import { describe, expect, it } from "vitest";
 import {
@@ -21,7 +26,17 @@ describe("asset usage safety", () => {
   it("finds content references and prevents unsafe deletion", () => {
     const assetId = "ast_0123456789abcdef01234567" as AssetId;
     const graph = buildAssetUsageGraph([
-      { hero: { image: { id: assetId, alt: "Proofing desk" } } },
+      {
+        hero: {
+          image: {
+            id: assetId,
+            fileName: "proofing-desk.png",
+            mimeType: "image/png",
+            url: "https://assets.example.test/assets/proofing-desk.png",
+            altText: "Proofing desk",
+          },
+        },
+      },
     ]);
     expect(graph).toEqual([
       {
@@ -84,5 +99,73 @@ describe("asset usage safety", () => {
       ),
     ).toBe(true);
     expect(assetBytesMatchMime(new TextEncoder().encode("%PDF-1.7"), "application/pdf")).toBe(true);
+  });
+
+  it("replaces S3 object metadata while preserving immutable delivery headers", async () => {
+    const checksum = "b".repeat(64);
+    const copied: CopyObjectCommand[] = [];
+    const client = {
+      async send(command: unknown): Promise<unknown> {
+        if (command instanceof ListObjectsV2Command) {
+          return {
+            Contents: [{ Key: `assets/${checksum}/proof.png`, Size: 128 }],
+          };
+        }
+        if (command instanceof HeadObjectCommand) {
+          return {
+            ContentLength: 128,
+            ContentType: "image/png",
+            CacheControl: "public, max-age=31536000, immutable",
+            Metadata: {
+              assetid: `ast_${checksum.slice(0, 24)}`,
+              sha256: checksum,
+              originalfilename: "proof.png",
+              width: "1200",
+              height: "800",
+              alttext: "Old alternative text",
+              focalx: "0.1",
+              focaly: "0.2",
+            },
+          };
+        }
+        if (command instanceof CopyObjectCommand) {
+          copied.push(command);
+          return {};
+        }
+        throw new Error(`Unexpected S3 command: ${String(command)}`);
+      },
+    } as unknown as S3Client;
+    const store = new S3AssetStore({
+      client,
+      bucket: "assets",
+      publicBaseUrl: "https://assets.example.test",
+    });
+
+    const updated = await store.updateAssetMetadata({
+      id: `ast_${checksum.slice(0, 24)}` as AssetId,
+      altText: "A reviewed proof image",
+      focalPoint: { x: 0.45, y: 0.6 },
+    });
+
+    expect(updated).toMatchObject({
+      altText: "A reviewed proof image",
+      focalPoint: { x: 0.45, y: 0.6 },
+    });
+    expect(copied).toHaveLength(1);
+    expect(copied[0]?.input).toMatchObject({
+      Bucket: "assets",
+      Key: `assets/${checksum}/proof.png`,
+      MetadataDirective: "REPLACE",
+      ContentType: "image/png",
+      CacheControl: "public, max-age=31536000, immutable",
+      Metadata: {
+        originalfilename: "proof.png",
+        width: "1200",
+        height: "800",
+        altText: "A reviewed proof image",
+        focalX: "0.45",
+        focalY: "0.6",
+      },
+    });
   });
 });

@@ -1,3 +1,5 @@
+import AjvModule, { type ErrorObject, type ValidateFunction } from "ajv";
+
 export type FieldKind =
   | "text"
   | "rich-text"
@@ -129,6 +131,12 @@ export interface DefinitionConstraints {
   readonly recommendedPosition?: "first" | "last";
 }
 
+export interface SchemaMigrationMetadata {
+  readonly from: number;
+  readonly to: number;
+  readonly description: string;
+}
+
 export interface SchemaDefinition<TFields extends FieldRecord = FieldRecord> {
   readonly kind: "section" | "collection" | "page" | "post" | "global" | "settings";
   readonly name: string;
@@ -140,20 +148,48 @@ export interface SchemaDefinition<TFields extends FieldRecord = FieldRecord> {
   readonly defaults?: Readonly<Record<string, unknown>>;
   readonly constraints?: DefinitionConstraints;
   readonly features?: readonly ("routing" | "seo" | "localization" | "publication")[];
+  readonly migrations?: readonly SchemaMigrationMetadata[];
 }
 
 type DefinitionInput<TFields extends FieldRecord> = Omit<SchemaDefinition<TFields>, "kind">;
+
+function assertStableName(kind: string, name: string, version: number): void {
+  if (!/^[a-z][A-Za-z0-9-]*$/.test(name)) {
+    throw new Error(`${kind} name "${name}" must be a stable identifier.`);
+  }
+  if (!Number.isInteger(version) || version < 1) {
+    throw new Error(`${kind} "${name}" must have a positive integer version.`);
+  }
+}
+
+function assertMigrationChain(
+  name: string,
+  version: number,
+  migrations: readonly SchemaMigrationMetadata[] | undefined,
+): void {
+  if (version === 1 && (migrations === undefined || migrations.length === 0)) return;
+  let current = 1;
+  for (const migration of migrations ?? []) {
+    if (
+      migration.from !== current ||
+      migration.to !== current + 1 ||
+      migration.description.trim().length === 0
+    ) {
+      throw new Error(`Schema "${name}" has an invalid migration from version ${current}.`);
+    }
+    current = migration.to;
+  }
+  if (current !== version) {
+    throw new Error(`Schema "${name}" is missing a migration from version ${current}.`);
+  }
+}
 
 function define<TFields extends FieldRecord>(
   kind: SchemaDefinition["kind"],
   input: DefinitionInput<TFields>,
 ): SchemaDefinition<TFields> {
-  if (!/^[a-z][A-Za-z0-9-]*$/.test(input.name)) {
-    throw new Error(`Schema name "${input.name}" must be a stable identifier.`);
-  }
-  if (!Number.isInteger(input.version) || input.version < 1) {
-    throw new Error(`Schema "${input.name}" must have a positive integer version.`);
-  }
+  assertStableName("Schema", input.name, input.version);
+  assertMigrationChain(input.name, input.version, input.migrations);
   return Object.freeze({ kind, ...input });
 }
 
@@ -175,6 +211,96 @@ export const defineGlobal = <TFields extends FieldRecord>(
 export const defineSettings = <TFields extends FieldRecord>(
   input: DefinitionInput<TFields>,
 ): SchemaDefinition<TFields> => define("settings", input);
+
+export interface TemplateSection {
+  readonly id: string;
+  readonly type: string;
+  readonly values?: Readonly<Record<string, unknown>>;
+}
+
+export interface TemplateDefinition {
+  readonly kind: "template";
+  readonly name: string;
+  readonly version: number;
+  readonly label: string;
+  readonly description?: string;
+  readonly pageType: string;
+  readonly sections: readonly TemplateSection[];
+}
+
+export function defineTemplate(input: Omit<TemplateDefinition, "kind">): TemplateDefinition {
+  assertStableName("Template", input.name, input.version);
+  const ids = new Set<string>();
+  for (const section of input.sections) {
+    if (section.id.trim().length === 0 || section.type.trim().length === 0) {
+      throw new Error(`Template "${input.name}" contains an incomplete section.`);
+    }
+    if (ids.has(section.id)) {
+      throw new Error(`Template "${input.name}" contains duplicate section ID "${section.id}".`);
+    }
+    ids.add(section.id);
+  }
+  return Object.freeze({ kind: "template", ...input });
+}
+
+export interface WorkflowState {
+  readonly id: string;
+  readonly label: string;
+  readonly terminal?: boolean;
+}
+
+export interface WorkflowTransition {
+  readonly from: string;
+  readonly to: string;
+  readonly permission: string;
+  readonly confirmation?: boolean;
+}
+
+export interface WorkflowDefinition {
+  readonly kind: "workflow";
+  readonly name: string;
+  readonly version: number;
+  readonly label: string;
+  readonly initialState: string;
+  readonly states: readonly WorkflowState[];
+  readonly transitions: readonly WorkflowTransition[];
+}
+
+export function defineWorkflow(input: Omit<WorkflowDefinition, "kind">): WorkflowDefinition {
+  assertStableName("Workflow", input.name, input.version);
+  const states = new Set(input.states.map((state) => state.id));
+  if (!states.has(input.initialState) || states.size !== input.states.length) {
+    throw new Error(`Workflow "${input.name}" has invalid or duplicate states.`);
+  }
+  for (const transition of input.transitions) {
+    if (
+      !states.has(transition.from) ||
+      !states.has(transition.to) ||
+      transition.permission.trim().length === 0
+    ) {
+      throw new Error(`Workflow "${input.name}" contains an invalid transition.`);
+    }
+  }
+  return Object.freeze({ kind: "workflow", ...input });
+}
+
+export type CmsDefinition = SchemaDefinition | TemplateDefinition | WorkflowDefinition;
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, stableValue(child)]),
+  );
+}
+
+export function compileStableAst<TDefinition extends CmsDefinition>(
+  definition: TDefinition,
+): TDefinition {
+  return stableValue(definition) as TDefinition;
+}
 
 export interface JsonSchema {
   readonly [key: string]: unknown;
@@ -226,8 +352,14 @@ function fieldSchema(definition: FieldDefinition): JsonSchema {
     case "asset":
       return {
         type: "object",
-        required: ["id"],
-        properties: { id: { type: "string" }, alt: { type: "string" } },
+        required: ["id", "fileName", "mimeType", "url"],
+        properties: {
+          id: { type: "string", pattern: "^ast_[0-9A-Za-z]+$" },
+          fileName: { type: "string", minLength: 1 },
+          mimeType: { type: "string", minLength: 1 },
+          url: { type: "string", minLength: 1 },
+          altText: { type: "string" },
+        },
         additionalProperties: false,
       };
     case "reference": {
@@ -309,6 +441,117 @@ export function compileEditorManifest(definition: SchemaDefinition): EditorManif
   };
 }
 
+export interface McpSchemaDescription {
+  readonly name: string;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: JsonSchema;
+}
+
+export function compileMcpDescription(definition: SchemaDefinition): McpSchemaDescription {
+  return {
+    name: `${definition.kind}_${definition.name}`,
+    title: definition.label,
+    description:
+      definition.description ??
+      `Create or update ${definition.label} content using schema version ${definition.version}.`,
+    inputSchema: compileJsonSchema(definition),
+  };
+}
+
+export interface ValidationIssue {
+  readonly path: string;
+  readonly keyword: string;
+  readonly message: string;
+}
+
+export type ValidationResult<TValue> =
+  | { readonly valid: true; readonly value: TValue }
+  | { readonly valid: false; readonly issues: readonly ValidationIssue[] };
+
+export interface ValueValidator<TValue> {
+  readonly validate: (value: unknown) => ValidationResult<TValue>;
+}
+
+function validationIssues(errors: readonly ErrorObject[] | null | undefined): ValidationIssue[] {
+  return (errors ?? []).map((error) => ({
+    path: error.instancePath || "/",
+    keyword: error.keyword,
+    message: error.message ?? "The value is invalid.",
+  }));
+}
+
+export function compileValidator<TValue = Readonly<Record<string, unknown>>>(
+  definition: SchemaDefinition,
+): ValueValidator<TValue> {
+  const AjvConstructor = AjvModule as unknown as new (options: {
+    readonly allErrors: boolean;
+    readonly strict: boolean;
+    readonly validateSchema: boolean;
+    readonly formats: Readonly<Record<string, RegExp>>;
+  }) => { compile(schema: unknown): ValidateFunction };
+  const ajv = new AjvConstructor({
+    allErrors: true,
+    strict: false,
+    validateSchema: false,
+    formats: {
+      date: /^\d{4}-\d{2}-\d{2}$/u,
+      "date-time": /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u,
+    },
+  });
+  const validate = ajv.compile(compileJsonSchema(definition));
+  return {
+    validate(value) {
+      return validate(value)
+        ? { valid: true, value: value as TValue }
+        : { valid: false, issues: validationIssues(validate.errors) };
+    },
+  };
+}
+
+export interface ZodLikeSchema<TValue> {
+  safeParse(
+    value: unknown,
+  ):
+    | { readonly success: true; readonly data: TValue }
+    | { readonly success: false; readonly error: unknown };
+}
+
+export function fromZod<TValue>(schema: ZodLikeSchema<TValue>): ValueValidator<TValue> {
+  return {
+    validate(value) {
+      const result = schema.safeParse(value);
+      return result.success
+        ? { valid: true, value: result.data }
+        : {
+            valid: false,
+            issues: [
+              {
+                path: "/",
+                keyword: "zod",
+                message:
+                  result.error instanceof Error ? result.error.message : "Zod validation failed.",
+              },
+            ],
+          };
+    },
+  };
+}
+
+export interface CompiledMigrationMetadata {
+  readonly schema: string;
+  readonly currentVersion: number;
+  readonly chain: readonly SchemaMigrationMetadata[];
+}
+
+export function compileMigrationMetadata(definition: SchemaDefinition): CompiledMigrationMetadata {
+  return {
+    schema: `${definition.kind}/${definition.name}`,
+    currentVersion: definition.version,
+    chain: definition.migrations ?? [],
+  };
+}
+
 function fieldType(definition: FieldDefinition): string {
   switch (definition.kind) {
     case "text":
@@ -330,7 +573,7 @@ function fieldType(definition: FieldDefinition): string {
     case "link":
       return "{ readonly href: string; readonly label?: string }";
     case "asset":
-      return "{ readonly id: string; readonly alt?: string }";
+      return "{ readonly id: string; readonly fileName: string; readonly mimeType: string; readonly url: string; readonly altText?: string }";
     case "reference": {
       const value = "{ readonly collection: string; readonly id: string }";
       return definition.multiple === true ? `readonly ${value}[]` : value;

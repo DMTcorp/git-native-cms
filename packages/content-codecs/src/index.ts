@@ -6,6 +6,17 @@ export interface ContentCodec {
   serialize(value: unknown): string;
 }
 
+export interface ContentSourceLocation {
+  readonly line: number;
+  readonly column: number;
+  readonly offset?: number;
+}
+
+export interface ContentDiagnostic {
+  readonly message: string;
+  readonly location?: ContentSourceLocation;
+}
+
 const PROTECTED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_CONTENT_BYTES = 4 * 1024 * 1024;
 
@@ -131,4 +142,72 @@ export function codecForPath(path: string): ContentCodec {
   if (path.endsWith(".yaml") || path.endsWith(".yml")) return yamlCodec;
   if (path.endsWith(".md") || path.endsWith(".mdx")) return markdownCodec;
   throw new Error(`No content codec is registered for ${path}.`);
+}
+
+function offsetLocation(source: string, offset: number): ContentSourceLocation {
+  const prefix = source.slice(0, Math.max(0, offset));
+  const lines = prefix.split("\n");
+  return {
+    line: lines.length,
+    column: (lines.at(-1)?.length ?? 0) + 1,
+    offset,
+  };
+}
+
+function errorLocation(error: unknown, source: string): ContentSourceLocation | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  if ("linePos" in error && Array.isArray(error.linePos)) {
+    const position = error.linePos[0] as
+      { readonly line?: unknown; readonly col?: unknown } | undefined;
+    if (typeof position?.line === "number" && typeof position.col === "number") {
+      return { line: position.line, column: position.col };
+    }
+  }
+  if (error instanceof SyntaxError) {
+    const match = /position\s+(\d+)/iu.exec(error.message);
+    if (match?.[1] !== undefined) return offsetLocation(source, Number(match[1]));
+  }
+  return undefined;
+}
+
+export function parseContentWithDiagnostics(
+  path: string,
+  source: string,
+):
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly diagnostics: readonly ContentDiagnostic[] } {
+  try {
+    return { ok: true, value: codecForPath(path).parse(source) };
+  } catch (error) {
+    const location = errorLocation(error, source);
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          message: error instanceof Error ? error.message : "Content parsing failed.",
+          ...(location === undefined ? {} : { location }),
+        },
+      ],
+    };
+  }
+}
+
+export function serializeContent(
+  path: string,
+  value: unknown,
+  options: {
+    readonly mode?: "canonical" | "preserve";
+    readonly originalSource?: string;
+  } = {},
+): string {
+  if (options.mode === "preserve" && options.originalSource !== undefined) {
+    const original = parseContentWithDiagnostics(path, options.originalSource);
+    if (
+      original.ok &&
+      JSON.stringify(canonicalize(original.value)) === JSON.stringify(canonicalize(value))
+    ) {
+      return options.originalSource;
+    }
+  }
+  return codecForPath(path).serialize(value);
 }

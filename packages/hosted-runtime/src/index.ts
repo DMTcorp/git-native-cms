@@ -3,8 +3,12 @@ import {
   createCmsApplication,
   type CmsApplication,
   type AuditEvent,
+  type AuditQueryPort,
   type AuditSink,
   type Asset,
+  type AssetProcessorPort,
+  type AssetStore,
+  type ChangeConflict,
   type Clock,
   type DocumentSummary,
   type EnvironmentPointer,
@@ -12,8 +16,14 @@ import {
   type IdempotencyStore,
   type ReviewCheck,
   type ReviewComment,
+  type ReviewAssignment,
+  type StagingBatchLock,
   type SessionRecord,
   type StoredRelease,
+  type ReleaseStore,
+  type SessionStore,
+  type TeamMember,
+  type OrganizationTeam,
 } from "@git-native-cms/application";
 import {
   createGitHubOAuthAttempt,
@@ -24,7 +34,7 @@ import {
   type OAuthAttempt,
 } from "@git-native-cms/auth";
 import { S3AssetStore, buildAssetUsageGraph } from "@git-native-cms/assets";
-import { yamlCodec } from "@git-native-cms/content-codecs";
+import { canonicalJson, yamlCodec } from "@git-native-cms/content-codecs";
 import { GitContentRepository } from "@git-native-cms/content-repository";
 import {
   CmsError,
@@ -43,7 +53,9 @@ import { S3ReleaseStore } from "@git-native-cms/delivery";
 import {
   createGitHubAppRequester,
   GitHubGitProvider,
+  GitHubIdentityProvider,
   GitHubReviewPort,
+  GitHubTeamProvisioning,
 } from "@git-native-cms/github";
 import { S3ImageAssetProcessor } from "@git-native-cms/image-pipeline";
 import {
@@ -58,11 +70,21 @@ import {
 import { exportXliff } from "@git-native-cms/localization";
 import { handleMcpHttp, type CmsMcpQueries, type ConfirmationService } from "@git-native-cms/mcp";
 import { consoleLogger, measured, type CmsLogger } from "@git-native-cms/observability";
-import { AuthorizationService } from "@git-native-cms/permissions";
+import {
+  AuthorizationService,
+  effectiveRoles,
+  parsePermissionConfiguration,
+  type CustomRoleDefinition,
+  type TeamRoleMapping,
+} from "@git-native-cms/permissions";
 import { deterministicReleaseBuilder } from "@git-native-cms/release-builder";
 import { buildReferenceGraph, buildSearchIndex, search } from "@git-native-cms/search";
 import { createCmsServer, type CmsServer } from "@git-native-cms/server";
-import { readSessionCookie, RotatingCookieSessionService } from "@git-native-cms/sessions";
+import {
+  readSessionCookie,
+  RotatingCookieSessionService,
+  SignedPreviewSessionService,
+} from "@git-native-cms/sessions";
 import { EncryptJWT, jwtDecrypt } from "jose";
 import {
   S3AuditSink,
@@ -88,6 +110,9 @@ export interface HostedRuntimeEnvironment {
   readonly GITHUB_OAUTH_CLIENT_ID?: string;
   readonly GITHUB_OAUTH_CLIENT_SECRET?: string;
   readonly GITHUB_WEBHOOK_SECRET?: string;
+  readonly GITHUB_API_BASE_URL?: string;
+  readonly GITHUB_WEB_BASE_URL?: string;
+  readonly CMS_GITHUB_TEAM_ROLES?: string;
   readonly CMS_SESSION_SECRET?: string;
   readonly CMS_S3_ENDPOINT?: string;
   readonly CMS_S3_REGION?: string;
@@ -98,6 +123,8 @@ export interface HostedRuntimeEnvironment {
   readonly CMS_STATE_BUCKET?: string;
   readonly CMS_PUBLIC_ASSETS_URL?: string;
   readonly CMS_PUBLIC_RELEASES_URL?: string;
+  readonly CMS_STAGING_SITE_URL?: string;
+  readonly CMS_PRODUCTION_SITE_URL?: string;
   readonly CMS_DEPLOYMENT_HOOK_URL?: string;
   readonly CMS_REVALIDATION_URL?: string;
   readonly CMS_INTEGRATION_TOKEN?: string;
@@ -136,8 +163,40 @@ export type HostedEditorState =
       readonly changes: readonly Change[];
       readonly releases: readonly StoredRelease[];
       readonly pointers: readonly EnvironmentPointer[];
+      readonly assets: readonly Asset[];
       readonly stagingRevision: GitCommitSha;
+      readonly stagingLock?: StagingBatchLock;
       readonly registryDigest: string;
+      readonly stagingUrl: string;
+      readonly productionUrl: string;
+      readonly csrfToken: string;
+      readonly projectName: string;
+    }
+  | {
+      readonly authenticated: true;
+      readonly view: "staging" | "releases" | "assets" | "settings" | "developer";
+      readonly actor: Actor;
+      readonly changes: readonly Change[];
+      readonly releases: readonly StoredRelease[];
+      readonly pointers: readonly EnvironmentPointer[];
+      readonly assets: readonly Asset[];
+      readonly stagingRevision: GitCommitSha;
+      readonly stagingLock?: StagingBatchLock;
+      readonly registryDigest: string;
+      readonly stagingUrl: string;
+      readonly productionUrl: string;
+      readonly csrfToken: string;
+      readonly projectName: string;
+    }
+  | {
+      readonly authenticated: true;
+      readonly view: "team";
+      readonly actor: Actor;
+      readonly organization: string;
+      readonly members: readonly TeamMember[];
+      readonly teams: readonly OrganizationTeam[];
+      readonly customRoles: readonly CustomRoleDefinition[];
+      readonly mainRevision: GitCommitSha;
       readonly csrfToken: string;
       readonly projectName: string;
     }
@@ -149,6 +208,7 @@ export type HostedEditorState =
       readonly document: ContentDocument<HostedEditablePage>;
       readonly baseDocument?: ContentDocument<HostedEditablePage>;
       readonly productionDocument?: ContentDocument<HostedEditablePage>;
+      readonly conflicts: readonly ChangeConflict[];
       readonly documents: readonly DocumentSummary[];
       readonly contentDocuments: readonly ContentDocument[];
       readonly previewDocument: ContentDocument<HostedEditablePage>;
@@ -156,6 +216,13 @@ export type HostedEditorState =
       readonly review: {
         readonly comments: readonly ReviewComment[];
         readonly checks: readonly ReviewCheck[];
+        readonly assignment: ReviewAssignment;
+        readonly timeline: readonly AuditEvent[];
+        readonly summary: {
+          readonly changedDocumentIds: readonly string[];
+          readonly affectedUsages: number;
+          readonly warnings: number;
+        };
       };
       readonly translationProviderAvailable: boolean;
       readonly registryDigest: string;
@@ -177,18 +244,16 @@ interface RuntimeConfiguration {
   readonly webhookSecret: string;
   readonly sessionSecret: string;
   readonly registryDigest: string;
-}
-
-interface GitHubIdentity {
-  readonly id: number;
-  readonly login: string;
-  readonly name?: string;
-  readonly permissions: Readonly<Record<string, boolean>>;
+  readonly githubApiBaseUrl: string;
+  readonly githubWebBaseUrl: string;
+  readonly teamRoleMappings: readonly TeamRoleMapping[];
+  readonly customRoles: readonly CustomRoleDefinition[];
 }
 
 interface InitializedRuntime {
   readonly application: CmsApplication;
   readonly server: CmsServer;
+  readonly git: GitHubGitProvider;
   readonly sessions: RotatingCookieSessionService;
   readonly listChanges: (actor: Actor) => Promise<readonly Change[]>;
   readonly getChange: (id: string, actor: Actor) => Promise<Change>;
@@ -199,6 +264,7 @@ interface InitializedRuntime {
   readonly listAssets: () => Promise<readonly Asset[]>;
   readonly content: GitContentRepository;
   readonly review: GitHubReviewPort;
+  readonly identity: GitHubIdentityProvider;
   readonly config: RuntimeConfiguration;
   readonly replayStore: MemoryWebhookReplayStore | S3WebhookReplayStore;
   readonly confirmationStore: ConfirmationReplayStore;
@@ -264,6 +330,33 @@ function configuration(environment: HostedRuntimeEnvironment): RuntimeConfigurat
   ] as const) {
     required(environment, storageKey);
   }
+  let teamRoleMappings: readonly TeamRoleMapping[] = [];
+  if (environment.CMS_GITHUB_TEAM_ROLES !== undefined) {
+    try {
+      const parsed = JSON.parse(environment.CMS_GITHUB_TEAM_ROLES) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("Expected an array.");
+      teamRoleMappings = parsed.map((value) => {
+        if (typeof value !== "object" || value === null) throw new Error("Invalid team mapping.");
+        const mapping = value as Readonly<Record<string, unknown>>;
+        if (
+          typeof mapping.team !== "string" ||
+          !Array.isArray(mapping.roles) ||
+          !mapping.roles.every((role) => typeof role === "string")
+        ) {
+          throw new Error("Invalid team mapping.");
+        }
+        return { team: mapping.team, roles: mapping.roles as readonly RoleName[] };
+      });
+    } catch (cause) {
+      throw new CmsError({
+        code: "CMS_CONFIGURATION_003",
+        message: "CMS_GITHUB_TEAM_ROLES must be a JSON array of team-to-role mappings.",
+        category: "configuration",
+        retryable: false,
+        cause,
+      });
+    }
+  }
   return {
     appId,
     privateKey: required(environment, "GITHUB_APP_PRIVATE_KEY").replaceAll("\\n", "\n"),
@@ -273,6 +366,10 @@ function configuration(environment: HostedRuntimeEnvironment): RuntimeConfigurat
     webhookSecret: required(environment, "GITHUB_WEBHOOK_SECRET"),
     sessionSecret,
     registryDigest,
+    githubApiBaseUrl: environment.GITHUB_API_BASE_URL ?? "https://api.github.com",
+    githubWebBaseUrl: environment.GITHUB_WEB_BASE_URL ?? "https://github.com",
+    teamRoleMappings,
+    customRoles: [],
   };
 }
 
@@ -310,11 +407,22 @@ class RuntimeIdempotencyStore implements IdempotencyStore {
   }
 }
 
-class RuntimeAuditSink implements AuditSink {
+class RuntimeAuditSink implements AuditSink, AuditQueryPort {
   readonly recent: AuditEvent[] = [];
   async write(event: AuditEvent): Promise<void> {
-    this.recent.push(event);
+    this.recent.push(structuredClone(event));
     if (this.recent.length > 500) this.recent.shift();
+  }
+
+  async list(input: {
+    readonly resourceId?: string;
+    readonly limit?: number;
+  }): Promise<readonly AuditEvent[]> {
+    return this.recent
+      .filter((event) => input.resourceId === undefined || event.resourceId === input.resourceId)
+      .slice(-(input.limit ?? 100))
+      .reverse()
+      .map((event) => structuredClone(event));
   }
 }
 
@@ -475,51 +583,6 @@ function secretMatches(expected: string | undefined, received: string | undefine
   return expected !== undefined && received !== undefined && csrfMatches(expected, received);
 }
 
-async function githubIdentity(
-  accessToken: string,
-  repository: { readonly owner: string; readonly name: string },
-): Promise<GitHubIdentity> {
-  const headers = {
-    accept: "application/vnd.github+json",
-    authorization: `Bearer ${accessToken}`,
-    "x-github-api-version": "2022-11-28",
-  };
-  const [userResponse, repositoryResponse] = await Promise.all([
-    fetch("https://api.github.com/user", { headers, redirect: "error" }),
-    fetch(
-      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`,
-      {
-        headers,
-        redirect: "error",
-      },
-    ),
-  ]);
-  if (!userResponse.ok || !repositoryResponse.ok) {
-    throw new CmsError({
-      code: "CMS_AUTH_009",
-      message: "Your GitHub account cannot access the sandbox content repository.",
-      category: "authorization",
-      retryable: false,
-    });
-  }
-  const user = (await userResponse.json()) as Record<string, unknown>;
-  const repositoryData = (await repositoryResponse.json()) as Record<string, unknown>;
-  if (typeof user.id !== "number" || typeof user.login !== "string") {
-    throw new Error("GitHub returned an invalid user profile.");
-  }
-  const permissionValue = repositoryData.permissions;
-  const permissions =
-    typeof permissionValue === "object" && permissionValue !== null
-      ? (permissionValue as Readonly<Record<string, boolean>>)
-      : {};
-  return {
-    id: user.id,
-    login: user.login,
-    ...(typeof user.name === "string" ? { name: user.name } : {}),
-    permissions,
-  };
-}
-
 function changeFrom(value: unknown): Change | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
@@ -625,6 +688,22 @@ export function createHostedCmsRuntime(options: {
   readonly projectName: string;
   readonly environment: HostedRuntimeEnvironment;
   readonly logger?: CmsLogger;
+  readonly registryManifest?: readonly {
+    readonly name: string;
+    readonly version: number;
+    readonly label: string;
+  }[];
+  readonly contentTypes?: readonly {
+    readonly name: string;
+    readonly version: number;
+    readonly label: string;
+  }[];
+  readonly adapters?: {
+    readonly assetStore?: AssetStore;
+    readonly assetProcessor?: AssetProcessorPort;
+    readonly releaseStore?: ReleaseStore;
+    readonly sessionStore?: SessionStore;
+  };
   readonly repository: {
     readonly owner: string;
     readonly name: string;
@@ -645,22 +724,56 @@ export function createHostedCmsRuntime(options: {
       appId: config.appId,
       privateKey: config.privateKey,
       installationId: config.installationId,
+      baseUrl: config.githubApiBaseUrl,
     });
     const git = new GitHubGitProvider({
       requester,
       owner: options.repository.owner,
       repository: options.repository.name,
     });
+    const permissionsFile = await git
+      .readFile({ ref: mainBranch, path: ".cms/permissions.yaml" })
+      .catch(() => undefined);
+    const gitPermissions =
+      permissionsFile === undefined
+        ? { mappings: [], customRoles: [] }
+        : parsePermissionConfiguration(yamlCodec.parse(permissionsFile.content));
+    const teamRoleMappings = [
+      ...new Map(
+        [...config.teamRoleMappings, ...gitPermissions.mappings].map((mapping) => [
+          mapping.team,
+          mapping,
+        ]),
+      ).values(),
+    ];
+    const runtimeConfig: RuntimeConfiguration = {
+      ...config,
+      teamRoleMappings,
+      customRoles: gitPermissions.customRoles,
+    };
     const content = new GitContentRepository(git);
+    const identity = new GitHubIdentityProvider({
+      owner: options.repository.owner,
+      repository: options.repository.name,
+      baseUrl: config.githubApiBaseUrl,
+    });
+    const teamProvisioning = new GitHubTeamProvisioning({
+      requester,
+      organization: options.repository.owner,
+    });
     const clock = new SystemClock();
     const ids = new RuntimeIds();
     const sessions = new RotatingCookieSessionService(config.sessionSecret, {
       secure: true,
+      ...(options.adapters?.sessionStore === undefined
+        ? {}
+        : { store: options.adapters.sessionStore }),
       revokeGitHubToken: (accessToken) =>
         revokeGitHubOAuthToken({
           clientId: config.oauthClientId,
           clientSecret: config.oauthClientSecret,
           accessToken,
+          apiBaseUrl: config.githubApiBaseUrl,
         }),
     });
     const s3 =
@@ -678,14 +791,16 @@ export function createHostedCmsRuntime(options: {
             },
           });
     const releaseStore =
-      s3 === undefined
+      options.adapters?.releaseStore ??
+      (s3 === undefined
         ? undefined
         : new S3ReleaseStore({
             client: s3,
             bucket: options.environment.CMS_RELEASES_BUCKET as string,
-          });
+          }));
     const assetStore =
-      s3 === undefined ||
+      options.adapters?.assetStore ??
+      (s3 === undefined ||
       options.environment.CMS_ASSETS_BUCKET === undefined ||
       options.environment.CMS_PUBLIC_ASSETS_URL === undefined
         ? undefined
@@ -693,9 +808,10 @@ export function createHostedCmsRuntime(options: {
             client: s3,
             bucket: options.environment.CMS_ASSETS_BUCKET,
             publicBaseUrl: options.environment.CMS_PUBLIC_ASSETS_URL,
-          });
+          }));
     const assetProcessor =
-      s3 === undefined ||
+      options.adapters?.assetProcessor ??
+      (s3 === undefined ||
       options.environment.CMS_ASSETS_BUCKET === undefined ||
       options.environment.CMS_PUBLIC_ASSETS_URL === undefined
         ? undefined
@@ -703,7 +819,7 @@ export function createHostedCmsRuntime(options: {
             client: s3,
             bucket: options.environment.CMS_ASSETS_BUCKET,
             publicBaseUrl: options.environment.CMS_PUBLIC_ASSETS_URL,
-          });
+          }));
     const publicationNotifier =
       options.environment.CMS_DEPLOYMENT_HOOK_URL === undefined ||
       options.environment.CMS_REVALIDATION_URL === undefined
@@ -790,11 +906,12 @@ export function createHostedCmsRuntime(options: {
     const application = createCmsApplication({
       git,
       content,
-      authorization: new AuthorizationService(),
+      authorization: new AuthorizationService(gitPermissions.customRoles),
       clock,
       ids,
       idempotency,
       audit: auditSink,
+      auditQuery: auditSink,
       review,
       mainBranch,
       stagingBranch,
@@ -810,6 +927,8 @@ export function createHostedCmsRuntime(options: {
           }),
       scheduler: new GitHubActionsScheduler(),
       ...(publicationNotifier === undefined ? {} : { publicationNotifier }),
+      previewSessions: new SignedPreviewSessionService(config.sessionSecret),
+      teamProvisioning,
       ...(translationProvider === undefined ? {} : { translationProvider }),
     });
 
@@ -881,6 +1000,8 @@ export function createHostedCmsRuntime(options: {
       );
       return pointers.filter((pointer): pointer is EnvironmentPointer => pointer !== undefined);
     }
+    const readStagingRevision = async (): Promise<GitCommitSha> =>
+      (await git.resolveRef(stagingBranch)).sha;
     async function listReleases(): Promise<readonly StoredRelease[]> {
       if (releaseStore === undefined) return [];
       const releases: StoredRelease[] = [];
@@ -894,8 +1015,17 @@ export function createHostedCmsRuntime(options: {
       } while (cursor !== undefined);
       return releases.sort((left, right) => String(right.id).localeCompare(String(left.id)));
     }
-    const listAssets = async (): Promise<readonly Asset[]> =>
-      assetStore === undefined ? [] : (await assetStore.listAssets({})).items;
+    const listAssets = async (): Promise<readonly Asset[]> => {
+      if (assetStore === undefined) return [];
+      const assets: Asset[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await assetStore.listAssets(cursor === undefined ? {} : { cursor });
+        assets.push(...page.items);
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      return assets;
+    };
 
     const actorForRequest = async (request: Request): Promise<Actor | undefined> => {
       const token = readSessionCookie(request.headers.get("cookie"));
@@ -958,6 +1088,18 @@ export function createHostedCmsRuntime(options: {
             releases: releaseStore !== undefined,
           },
         }),
+        staging: async (context) => {
+          const [revision, changes, pointers] = await Promise.all([
+            readStagingRevision(),
+            listChanges(context.actor),
+            listPointers(),
+          ]);
+          return {
+            revision,
+            changes: changes.filter((change) => change.status === "staging"),
+            pointer: pointers.find((pointer) => pointer.environment === "staging"),
+          };
+        },
         listChanges: async (context) => listChanges(context.actor),
         getChange: (id, context) => getChange(id, context.actor),
         listDocuments: async (changeId, context) => {
@@ -969,7 +1111,19 @@ export function createHostedCmsRuntime(options: {
           return content.readDocument({ ref: contentRef(change), documentId });
         },
         listReleases,
-        listAssets: async () => assetStore?.listAssets({}) ?? { items: [] },
+        listAssets: async () => ({ items: await listAssets() }),
+        getAsset: async (id) => {
+          const asset = await assetStore?.readAsset(id);
+          if (asset === undefined) {
+            throw new CmsError({
+              code: "CMS_ASSET_404",
+              message: "The selected asset does not exist.",
+              category: "validation",
+              retryable: false,
+            });
+          }
+          return asset;
+        },
         assetUsages: async (id) => assetUsage.usages(id),
         search: async (changeId, query, context) => {
           const change = await getChange(changeId, context.actor);
@@ -1051,17 +1205,19 @@ export function createHostedCmsRuntime(options: {
     return {
       application,
       server,
+      git,
       sessions,
       listChanges,
       getChange,
       contentRef,
       listReleases,
       listPointers,
-      stagingRevision: async () => (await git.resolveRef(stagingBranch)).sha,
+      stagingRevision: readStagingRevision,
       listAssets,
       content,
       review,
-      config,
+      identity,
+      config: runtimeConfig,
       replayStore,
       confirmationStore,
       rateLimitStore,
@@ -1084,6 +1240,7 @@ export function createHostedCmsRuntime(options: {
             const attempt = await createGitHubOAuthAttempt({
               clientId: current.config.oauthClientId,
               callbackUrl,
+              authorizationBaseUrl: current.config.githubWebBaseUrl,
             });
             const token = await encodeAttempt(attempt, current.config.sessionSecret);
             return new Response(null, {
@@ -1126,15 +1283,29 @@ export function createHostedCmsRuntime(options: {
               code,
               verifier: attempt.verifier,
               redirectUri: `${options.origin}${AUTH_PATH}/callback`,
+              oauthBaseUrl: current.config.githubWebBaseUrl,
               signal: request.signal,
             });
-            const identity = await githubIdentity(token.accessToken, options.repository);
+            const identity = await current.identity.resolve(token.accessToken, request.signal);
+            const githubId = Number(identity.externalId);
+            if (!Number.isSafeInteger(githubId)) {
+              throw new CmsError({
+                code: "CMS_AUTH_010",
+                message: "GitHub returned an invalid numeric account ID.",
+                category: "authentication",
+                retryable: false,
+              });
+            }
             const actor: Actor = {
-              id: actorId(identity.id),
-              githubId: identity.id,
+              id: actorId(githubId),
+              githubId,
               login: identity.login,
-              displayName: identity.name ?? identity.login,
-              roles: rolesFor(identity.permissions),
+              displayName: identity.displayName,
+              roles: effectiveRoles(
+                rolesFor(identity.capabilities),
+                identity.teams,
+                current.config.teamRoleMappings,
+              ),
               source: "ui",
             };
             const issued = await current.sessions.issue(actor, new Date(), token.accessToken);
@@ -1330,6 +1501,39 @@ export function createHostedCmsRuntime(options: {
               requestId: request.headers.get("x-request-id") ?? globalThis.crypto.randomUUID(),
               signal: request.signal,
             };
+            const mcpDocuments = async (
+              changeId: string,
+            ): Promise<
+              readonly {
+                readonly id: DocumentId;
+                readonly type: string;
+                readonly title: string;
+                readonly path: string;
+                readonly value: unknown;
+                readonly document: ContentDocument;
+              }[]
+            > => {
+              const change = await current.getChange(changeId, actor);
+              const summaries = await current.content.listDocuments({
+                ref: current.contentRef(change),
+              });
+              return await Promise.all(
+                summaries.items.map(async (summary) => {
+                  const document = await current.content.readDocument({
+                    ref: current.contentRef(change),
+                    documentId: summary.id,
+                  });
+                  return {
+                    id: summary.id,
+                    type: summary.type,
+                    title: summary.title,
+                    path: summary.path,
+                    value: document.data,
+                    document,
+                  };
+                }),
+              );
+            };
             const queries: CmsMcpQueries = {
               project: async () => ({
                 name: options.projectName,
@@ -1352,6 +1556,83 @@ export function createHostedCmsRuntime(options: {
               previewUrl: async (changeId) =>
                 `${options.origin}/cms/changes/${encodeURIComponent(changeId)}`,
               listReleases: () => current.listReleases(),
+              search: async (changeId, query) =>
+                search(buildSearchIndex(await mcpDocuments(changeId)), query).map((hit) => ({
+                  ...hit,
+                })),
+              findUsages: async (changeId, referenceId) =>
+                buildReferenceGraph(await mcpDocuments(changeId))
+                  .edges.filter((edge) => edge.targetId === referenceId)
+                  .map((edge) => ({ ...edge })),
+              validateChange: async (changeId) => {
+                const documents = await mcpDocuments(changeId);
+                const graph = buildReferenceGraph(documents);
+                const change = await current.getChange(changeId, actor);
+                return {
+                  changeId,
+                  revision: (await current.git.resolveRef(change.branchName)).sha,
+                  valid: graph.broken.length === 0,
+                  documents: documents.length,
+                  brokenReferences: graph.broken,
+                };
+              },
+              stagingStatus: async () => {
+                const ref = await current.git.resolveRef(stagingBranch);
+                const changes = (await current.listChanges(actor)).filter(
+                  (change) => change.status === "staging",
+                );
+                return {
+                  branch: stagingBranch,
+                  revision: ref.sha,
+                  changes,
+                  ready: changes.length > 0,
+                };
+              },
+              registrySections: async () => options.registryManifest ?? [],
+              registryContentTypes: async () =>
+                options.contentTypes ?? [
+                  { name: "pages", version: 1, label: "Pages" },
+                  { name: "posts", version: 1, label: "Posts" },
+                  { name: "collections", version: 1, label: "Collections" },
+                  { name: "globals", version: 1, label: "Globals" },
+                  { name: "settings", version: 1, label: "Settings" },
+                  { name: "reusable-blocks", version: 1, label: "Reusable Blocks" },
+                ],
+              contentGraph: async () => {
+                const changes = await current.listChanges(actor);
+                const change = changes[0];
+                if (change === undefined) return { nodes: [], edges: [], broken: [] };
+                const documents = await mcpDocuments(change.id);
+                const graph = buildReferenceGraph(documents);
+                return {
+                  nodes: documents.map(({ id, type, title, path }) => ({
+                    id,
+                    type,
+                    title,
+                    path,
+                  })),
+                  edges: graph.edges.map((edge) => ({ ...edge })),
+                  broken: graph.broken.map((reference) => ({ ...reference })),
+                };
+              },
+              getDocumentById: async (documentId) => {
+                for (const change of await current.listChanges(actor)) {
+                  try {
+                    return (await current.content.readDocument({
+                      ref: current.contentRef(change),
+                      documentId,
+                    })) as unknown as Readonly<Record<string, unknown>>;
+                  } catch {
+                    // Continue through visible Changes until the document is found.
+                  }
+                }
+                throw new CmsError({
+                  code: "CMS_CONTENT_404",
+                  message: `Document ${documentId} was not found in a visible Change.`,
+                  category: "validation",
+                  retryable: false,
+                });
+              },
             };
             const confirmation: ConfirmationService = {
               verify: (input) =>
@@ -1414,24 +1695,59 @@ export function createHostedCmsRuntime(options: {
         }
         const session: SessionRecord = await current.sessions.read(token);
         const segments = path.split("/").filter(Boolean).map(decodeURIComponent);
+        if (segments[0] === "team") {
+          const directory = await current.application.readTeamDirectory.execute({
+            actor: session.actor,
+            requestId: `req_${globalThis.crypto.randomUUID()}`,
+          });
+          return {
+            authenticated: true,
+            view: "team",
+            actor: session.actor,
+            organization: options.repository.owner,
+            members: directory.members,
+            teams: directory.teams,
+            customRoles: current.config.customRoles,
+            mainRevision: (await current.git.resolveRef(mainBranch)).sha,
+            csrfToken: session.csrfSecret,
+            projectName: options.projectName,
+          };
+        }
         const changeId =
           segments[0] === "changes" && segments[1] !== undefined ? segments[1] : undefined;
         if (changeId === undefined) {
-          const [changes, releases, pointers, stagingRevision] = await Promise.all([
+          const [changes, releases, pointers, assets, stagingBatch] = await Promise.all([
             current.listChanges(session.actor),
             current.listReleases(),
             current.listPointers(),
-            current.stagingRevision(),
+            current.listAssets(),
+            current.application.readStagingBatch.execute({
+              actor: session.actor,
+              requestId: `req_${globalThis.crypto.randomUUID()}`,
+            }),
           ]);
+          const requestedOverview = segments[0];
+          const view =
+            requestedOverview === "staging" ||
+            requestedOverview === "releases" ||
+            requestedOverview === "assets" ||
+            requestedOverview === "settings" ||
+            requestedOverview === "developer"
+              ? requestedOverview
+              : "dashboard";
           return {
             authenticated: true,
-            view: "dashboard",
+            view,
             actor: session.actor,
             changes,
             releases,
             pointers,
-            stagingRevision,
+            assets,
+            stagingRevision: stagingBatch.revision,
+            ...(stagingBatch.lock === undefined ? {} : { stagingLock: stagingBatch.lock }),
             registryDigest: current.config.registryDigest,
+            stagingUrl: options.environment.CMS_STAGING_SITE_URL ?? options.origin,
+            productionUrl: options.environment.CMS_PRODUCTION_SITE_URL ?? options.origin,
             csrfToken: session.csrfSecret,
             projectName: options.projectName,
           };
@@ -1471,17 +1787,71 @@ export function createHostedCmsRuntime(options: {
         const previewDocument =
           (contentDocuments.find((candidate) => candidate.type === "pages") as
             ContentDocument<HostedEditablePage> | undefined) ?? document;
-        const [baseDocument, productionDocument, comments, checks, assets] = await Promise.all([
+        const workspaceContext = {
+          actor: session.actor,
+          requestId: `req_${globalThis.crypto.randomUUID()}`,
+        };
+        const [
+          baseDocument,
+          productionDocument,
+          baseContentDocuments,
+          comments,
+          checks,
+          assignment,
+          assets,
+          timeline,
+          conflictState,
+        ] = await Promise.all([
           current.content
             .readDocument({ ref: change.baseCommit, documentId })
             .catch(() => undefined),
           current.content.readDocument({ ref: mainBranch, documentId }).catch(() => undefined),
+          Promise.all(
+            summaries.items.map((summary) =>
+              current.content
+                .readDocument({ ref: change.baseCommit, documentId: summary.id })
+                .catch(() => undefined),
+            ),
+          ),
           change.pullRequestNumber === undefined
             ? Promise.resolve([])
             : current.review.listComments(change.pullRequestNumber).catch(() => []),
           current.review.listChecks(document.revision).catch(() => []),
+          change.pullRequestNumber === undefined
+            ? Promise.resolve({ users: [], teams: [] })
+            : current.review
+                .listReviewers(change.pullRequestNumber)
+                .catch(() => ({ users: [], teams: [] })),
           current.listAssets(),
+          current.application.readAuditTimeline
+            .execute({ resourceId: change.id, limit: 100 }, workspaceContext)
+            .catch(() => []),
+          current.application.readChangeConflicts
+            .execute({ change }, workspaceContext)
+            .catch(() => ({ conflicts: [], stagingRevision: change.baseCommit })),
         ]);
+        const changedDocumentIds = contentDocuments
+          .filter((candidate, index) => {
+            const base = baseContentDocuments[index];
+            return base === undefined || canonicalJson(base.data) !== canonicalJson(candidate.data);
+          })
+          .map((candidate) => candidate.id);
+        const referenceGraph = buildReferenceGraph(
+          contentDocuments.map((candidate) => ({
+            id: candidate.id,
+            type: candidate.type,
+            title:
+              typeof candidate.data === "object" &&
+              candidate.data !== null &&
+              !Array.isArray(candidate.data) &&
+              typeof (candidate.data as Readonly<Record<string, unknown>>).title === "string"
+                ? ((candidate.data as Readonly<Record<string, unknown>>).title as string)
+                : candidate.id,
+            path: candidate.id,
+            value: candidate.data,
+          })),
+        );
+        const changedIds = new Set(changedDocumentIds);
         return {
           authenticated: true,
           view: "workspace",
@@ -1494,11 +1864,24 @@ export function createHostedCmsRuntime(options: {
           ...(productionDocument === undefined
             ? {}
             : { productionDocument: productionDocument as ContentDocument<HostedEditablePage> }),
+          conflicts: conflictState.conflicts,
           documents: summaries.items,
           contentDocuments,
           previewDocument,
           assets,
-          review: { comments, checks },
+          review: {
+            comments,
+            checks,
+            assignment,
+            timeline,
+            summary: {
+              changedDocumentIds,
+              affectedUsages: referenceGraph.edges.filter((edge) =>
+                changedIds.has(edge.targetId as DocumentId),
+              ).length,
+              warnings: referenceGraph.broken.length,
+            },
+          },
           translationProviderAvailable:
             options.environment.CMS_TRANSLATION_PROVIDER_URL !== undefined,
           registryDigest: current.config.registryDigest,
