@@ -43,6 +43,18 @@ const sessions = new RotatingCookieSessionService(sessionSecret);
 const editorSession = await sessions.issue(editor);
 const reviewerSession = await sessions.issue(reviewer);
 
+class LiveApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly context?: Readonly<Record<string, unknown>>,
+  ) {
+    super(message);
+    this.name = "LiveApiError";
+  }
+}
+
 async function api<TValue>(
   session: typeof editorSession,
   method: string,
@@ -65,16 +77,27 @@ async function api<TValue>(
   });
   const result = (await response.json()) as {
     readonly payload?: TValue & {
-      readonly error?: { readonly code?: string; readonly message?: string };
+      readonly error?: {
+        readonly code?: string;
+        readonly message?: string;
+        readonly context?: Readonly<Record<string, unknown>>;
+      };
     };
-    readonly error?: { readonly code?: string; readonly message?: string };
+    readonly error?: {
+      readonly code?: string;
+      readonly message?: string;
+      readonly context?: Readonly<Record<string, unknown>>;
+    };
   };
   if (!response.ok) {
     const error = result.error ?? result.payload?.error;
-    throw new Error(
+    throw new LiveApiError(
+      response.status,
+      error?.code ?? "CMS_UNKNOWN",
       `${method} ${path} failed (${response.status}) ${error?.code ?? "CMS_UNKNOWN"}: ${
         error?.message ?? "Unknown CMS error."
       }`,
+      error?.context,
     );
   }
   return (result.payload ?? result) as TValue;
@@ -261,25 +284,34 @@ const inspectedConflicts = await api<{
 const stagingRevision =
   inspectedConflicts.conflicts.length === 0
     ? approved.revision
-    : (
-        await api<{ readonly revision: string }>(
-          editorSession,
-          "POST",
-          `changes/${change.id}/conflicts/resolve`,
-          {
-            expectedRevision: approved.revision,
-            resolutions: inspectedConflicts.conflicts.map((conflict) => ({
-              documentId: conflict.documentId,
-              path: conflict.path,
-              choice: "change",
-            })),
-            idempotencyKey: `live:${runId}:resolve-conflicts`,
-          },
-          `live:${runId}:resolve-conflicts`,
-        )
-      ).revision;
+    : await (async () => {
+        try {
+          return (
+            await api<{ readonly revision: string }>(
+              editorSession,
+              "POST",
+              `changes/${change.id}/conflicts/resolve`,
+              {
+                expectedRevision: approved.revision,
+                resolutions: inspectedConflicts.conflicts.map((conflict) => ({
+                  documentId: conflict.documentId,
+                  path: conflict.path,
+                  choice: "change",
+                })),
+                idempotencyKey: `live:${runId}:resolve-conflicts`,
+              },
+              `live:${runId}:resolve-conflicts`,
+            )
+          ).revision;
+        } catch (error) {
+          if (error instanceof LiveApiError && error.code === "CMS_CHANGE_017") {
+            return approved.revision;
+          }
+          throw error;
+        }
+      })();
 const stagingApproval =
-  inspectedConflicts.conflicts.length === 0
+  stagingRevision === approved.revision
     ? approved
     : await api<{ readonly revision: string }>(
         reviewerSession,

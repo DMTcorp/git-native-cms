@@ -1683,6 +1683,16 @@ describe("application commands", () => {
       members: [{ login: "octo-editor" }],
       teams: [{ slug: "editors" }],
     });
+    await expect(
+      application.inviteTeamMember.execute(
+        {
+          email: `${"a".repeat(255)}@example.test`,
+          role: "direct_member",
+          idempotencyKey: "team:invalid-invite",
+        },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: "CMS_TEAM_004" });
     await application.inviteTeamMember.execute(
       {
         email: "new-editor@example.test",

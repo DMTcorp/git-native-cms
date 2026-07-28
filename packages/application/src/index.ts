@@ -1415,6 +1415,41 @@ function configuredTeamProvisioning(dependencies: CommandDependencies): TeamProv
   return dependencies.teamProvisioning;
 }
 
+function isValidInvitationEmail(value: string): boolean {
+  if (value.length === 0 || value.length > 254) return false;
+  let atIndex = -1;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index] ?? "";
+    const code = value.charCodeAt(index);
+    if (code <= 32 || code === 127) return false;
+    if (character === "@") {
+      if (atIndex !== -1) return false;
+      atIndex = index;
+    }
+  }
+  if (atIndex <= 0 || atIndex > 64 || atIndex === value.length - 1) return false;
+  const local = value.slice(0, atIndex);
+  const domain = value.slice(atIndex + 1);
+  if (
+    local.startsWith(".") ||
+    local.endsWith(".") ||
+    local.includes("..") ||
+    domain.length > 253 ||
+    domain.startsWith(".") ||
+    domain.endsWith(".") ||
+    domain.includes("..") ||
+    !domain.includes(".")
+  ) {
+    return false;
+  }
+  return domain
+    .split(".")
+    .every(
+      (label) =>
+        label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"),
+    );
+}
+
 export class ReadTeamDirectoryHandler {
   constructor(private readonly dependencies: CommandDependencies) {}
 
@@ -1445,7 +1480,7 @@ export class InviteTeamMemberHandler {
     context: RequestContext,
   ): Promise<TeamInvitation> {
     this.dependencies.authorization.assert(context.actor, "team.manage");
-    if (input.email !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(input.email)) {
+    if (input.email !== undefined && !isValidInvitationEmail(input.email)) {
       throw new CmsError({
         code: "CMS_TEAM_004",
         message: "A valid invitation email address is required.",

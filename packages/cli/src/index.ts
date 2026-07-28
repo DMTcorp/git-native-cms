@@ -685,9 +685,7 @@ function githubAppManifest(input: {
     url: input.origin,
     redirect_url: input.redirectUrl,
     callback_urls: [`${origin}/api/cms/auth/github/callback`],
-    ...(input.setupUrl === undefined
-      ? {}
-      : { setup_url: input.setupUrl, setup_on_update: true }),
+    ...(input.setupUrl === undefined ? {} : { setup_url: input.setupUrl, setup_on_update: true }),
     public: false,
     hook_attributes: {
       active: true,
@@ -728,15 +726,33 @@ function githubManifestForm(owner: string, manifestSource: string): string {
 }
 
 async function openExternalUrl(url: string): Promise<void> {
+  if (url.length > 2_048) {
+    throw new Error("Refusing to open an unexpectedly long external URL.");
+  }
+  const parsed = new URL(url);
+  const isLocalSetupFile =
+    parsed.protocol === "file:" &&
+    (parsed.hostname.length === 0 || parsed.hostname === "localhost") &&
+    parsed.username.length === 0 &&
+    parsed.password.length === 0;
+  const isGitHubInstallation =
+    parsed.protocol === "https:" &&
+    parsed.hostname === "github.com" &&
+    parsed.username.length === 0 &&
+    parsed.password.length === 0;
+  if (!isLocalSetupFile && !isGitHubInstallation) {
+    throw new Error("Refusing to open an URL outside the local setup file or github.com.");
+  }
+  const safeUrl = parsed.href;
   if (process.platform === "darwin") {
-    await execFileAsync("open", [url]);
+    await execFileAsync("/usr/bin/open", [safeUrl]);
     return;
   }
   if (process.platform === "win32") {
-    await execFileAsync("cmd", ["/c", "start", "", url]);
+    await execFileAsync("rundll32.exe", ["url.dll,FileProtocolHandler", safeUrl]);
     return;
   }
-  await execFileAsync("xdg-open", [url]);
+  await execFileAsync("xdg-open", [safeUrl]);
 }
 
 interface GitHubManifestConversion {
