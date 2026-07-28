@@ -2848,7 +2848,10 @@ async function readOptionalDocument(input: {
       documentId: input.documentId,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     })
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+      if (error instanceof CmsError && error.code === "CMS_DOCUMENT_404") return undefined;
+      throw error;
+    });
 }
 
 async function listAllDocumentIds(input: {
@@ -3156,10 +3159,14 @@ export class ResolveChangeConflictsHandler {
       const choices = new Map<string, ChangeConflictResolution["choice"]>();
       for (const resolution of resolutions) {
         const key = `${resolution.documentId}:${resolution.path}`;
-        if (choices.has(key) || !knownConflicts.has(key)) {
+        const previousChoice = choices.get(key);
+        if (
+          !knownConflicts.has(key) ||
+          (previousChoice !== undefined && previousChoice !== resolution.choice)
+        ) {
           throw new CmsError({
             code: "CMS_CHANGE_018",
-            message: `Conflict ${key} is unknown or has more than one resolution.`,
+            message: `Conflict ${key} is unknown or has contradictory resolutions.`,
             category: "validation",
             retryable: false,
           });

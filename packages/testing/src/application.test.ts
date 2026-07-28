@@ -411,6 +411,11 @@ describe("application commands", () => {
             path: contentPath("/title"),
             choice: "change",
           },
+          {
+            documentId,
+            path: contentPath("/title"),
+            choice: "change",
+          },
         ],
         idempotencyKey: "conflict:resolve",
       },
