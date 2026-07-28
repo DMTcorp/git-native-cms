@@ -1,5 +1,5 @@
 import { contractPassed, GitProviderContract } from "@git-native-cms/adapter-kit";
-import type { Actor } from "@git-native-cms/core";
+import type { Actor, GitCommitSha } from "@git-native-cms/core";
 import { describe, expect, it } from "vitest";
 import { GitHubGitProvider, type GitHubRequester } from "./index.js";
 
@@ -139,6 +139,47 @@ class GitHubFixtureRequester implements GitHubRequester {
 }
 
 describe("GitHub Git Data adapter contract", () => {
+  it("uses the create-ref response without waiting for the new branch to become readable", async () => {
+    const routes: string[] = [];
+    const sha = "b".repeat(40);
+    const requester: GitHubRequester = {
+      async request(route) {
+        routes.push(route);
+        if (route === "GET /repos/{owner}/{repo}/git/ref/{ref}") {
+          throw { status: 404 };
+        }
+        if (route === "POST /repos/{owner}/{repo}/git/refs") {
+          return {
+            data: {
+              ref: "refs/heads/rollback/eventually-consistent",
+              object: { sha },
+            },
+          };
+        }
+        throw new Error(`Unexpected route: ${route}`);
+      },
+    };
+    const provider = new GitHubGitProvider({
+      requester,
+      owner: "DMTcorp",
+      repository: "fixture",
+    });
+
+    await expect(
+      provider.createBranch({
+        branch: "rollback/eventually-consistent",
+        from: sha as GitCommitSha,
+      }),
+    ).resolves.toEqual({
+      name: "rollback/eventually-consistent",
+      sha,
+    });
+    expect(routes).toEqual([
+      "GET /repos/{owner}/{repo}/git/ref/{ref}",
+      "POST /repos/{owner}/{repo}/git/refs",
+    ]);
+  });
+
   it("passes the shared GitProvider contract against recorded response shapes", async () => {
     const actor: Actor = {
       id: "act_github_fixture" as Actor["id"],

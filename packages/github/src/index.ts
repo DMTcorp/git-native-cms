@@ -116,11 +116,11 @@ export class GitHubGitProvider implements GitProvider {
     try {
       return await this.resolveRef(branch);
     } catch {
-      await this.requester.request(
+      const response = await this.requester.request(
         "POST /repos/{owner}/{repo}/git/refs",
         this.parameters({ ref: `refs/heads/${branch}`, sha: input.from }),
       );
-      return this.resolveRef(branch);
+      return { name: branch, sha: shaFrom(record(response.data).object) };
     }
   }
 
