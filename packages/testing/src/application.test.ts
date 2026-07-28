@@ -68,23 +68,22 @@ class StrictDeleteMemoryGitProvider extends MemoryGitProvider {
 }
 
 class EventuallyConsistentMemoryGitProvider extends MemoryGitProvider {
-  private rejectNextRefRead = false;
+  private staleRef: Awaited<ReturnType<MemoryGitProvider["resolveRef"]>> | undefined;
 
   override async resolveRef(input: Parameters<MemoryGitProvider["resolveRef"]>[0]) {
-    if (this.rejectNextRefRead) {
-      this.rejectNextRefRead = false;
-      throw new Error("A just-updated GitHub ref was read before it became consistent.");
+    if (this.staleRef?.name === input) {
+      const stale = this.staleRef;
+      this.staleRef = undefined;
+      return stale;
     }
     return super.resolveRef(input);
   }
 
   override async commitFiles(input: Parameters<GitProvider["commitFiles"]>[0]) {
-    if (input.message.includes("Resolve semantic conflicts with Staging")) {
-      this.rejectNextRefRead = false;
-    }
+    const before = await super.resolveRef(input.branch);
     const committed = await super.commitFiles(input);
     if (/^Resolve \d+ conflict\(s\) with Staging$/u.test(input.message)) {
-      this.rejectNextRefRead = true;
+      this.staleRef = before;
     }
     return committed;
   }
@@ -263,7 +262,9 @@ describe("application commands", () => {
 
   it("resolves every semantic conflict against Staging and resets approval", async () => {
     const documentId = "doc_conflicted_home" as DocumentId;
+    const deletedDocumentId = "doc_deleted_on_staging" as DocumentId;
     const path = "content/pages/conflicted-home/index.yaml";
+    const deletedPath = "content/pages/deleted-on-staging/index.yaml";
     const git = new EventuallyConsistentMemoryGitProvider({
       [path]: yamlCodec.serialize({
         id: documentId,
@@ -272,6 +273,12 @@ describe("application commands", () => {
         title: "Original",
         subtitle: "Original subtitle",
         announcement: "Original announcement",
+      }),
+      [deletedPath]: yamlCodec.serialize({
+        id: deletedDocumentId,
+        type: "pages",
+        schemaVersion: 1,
+        title: "Deleted on Staging",
       }),
     });
     const content = new GitContentRepository(git);
@@ -329,7 +336,7 @@ describe("application commands", () => {
       context,
     );
     const stagingDocument = await content.readDocument({ ref: "staging", documentId });
-    const stagingRevision = await content.writeDocuments({
+    const stagingWriteRevision = await content.writeDocuments({
       ref: "staging",
       documents: [
         {
@@ -345,6 +352,13 @@ describe("application commands", () => {
       message: "Concurrent Staging edit",
       actor: reviewer,
       idempotencyKey: "conflict:edit-staging",
+    });
+    const stagingRevision = await content.deleteDocuments({
+      ref: "staging",
+      documentIds: [deletedDocumentId],
+      expectedRevision: stagingWriteRevision,
+      actor: reviewer,
+      idempotencyKey: "conflict:delete-staging-document",
     });
     const submitted = await application.submitChange.execute(
       {
@@ -378,17 +392,15 @@ describe("application commands", () => {
       { change: approved.change },
       context,
     );
-    expect(conflictState).toMatchObject({
-      stagingRevision,
-      conflicts: [
-        {
-          documentId,
-          path: "/title",
-          change: "Title from this Change",
-          staging: "Title from Staging",
-        },
-      ],
-    });
+    expect(conflictState.stagingRevision).toBe(stagingRevision);
+    expect(conflictState.conflicts).toEqual([
+      expect.objectContaining({
+        documentId,
+        path: "/title",
+        change: "Title from this Change",
+        staging: "Title from Staging",
+      }),
+    ]);
     const resolved = await application.resolveChangeConflicts.execute(
       {
         change: approved.change,
@@ -418,6 +430,9 @@ describe("application commands", () => {
         announcement: "Announcement from Staging",
       },
     });
+    await expect(
+      content.readDocument({ ref: change.branchName, documentId: deletedDocumentId }),
+    ).rejects.toMatchObject({ code: "CMS_DOCUMENT_404" });
     await expect(
       application.readChangeConflicts.execute({ change: resolved.change }, context),
     ).resolves.toMatchObject({ conflicts: [] });

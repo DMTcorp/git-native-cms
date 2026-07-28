@@ -163,18 +163,9 @@ export class GitContentRepository implements ContentRepository {
   async writeDocuments(
     input: Parameters<ContentRepository["writeDocuments"]>[0],
   ): Promise<Revision> {
-    const ref = await this.git.resolveRef(input.ref, input.signal);
-    if (ref.sha !== input.expectedRevision) {
-      throw new CmsError({
-        code: "CMS_CHANGE_003",
-        message: "The Change moved while content was being saved.",
-        category: "conflict",
-        retryable: true,
-      });
-    }
     const committed = await this.git.commitFiles({
       branch: input.ref,
-      expectedSha: ref.sha,
+      expectedSha: input.expectedRevision,
       files: input.documents.map((document) => ({
         path: contentFilePath(document),
         content: encodeDocument(document),
@@ -197,18 +188,9 @@ export class GitContentRepository implements ContentRepository {
     const paths = summaries.items
       .filter((summary) => input.documentIds.includes(summary.id))
       .map((summary) => summary.path);
-    const ref = await this.git.resolveRef(input.ref, input.signal);
-    if (ref.sha !== input.expectedRevision) {
-      throw new CmsError({
-        code: "CMS_CHANGE_003",
-        message: "The Change moved while content was being deleted.",
-        category: "conflict",
-        retryable: true,
-      });
-    }
     const committed = await this.git.commitFiles({
       branch: input.ref,
-      expectedSha: ref.sha,
+      expectedSha: input.expectedRevision,
       files: paths.map((path) => ({ path, content: null })),
       message: `Delete ${paths.length} document(s)`,
       author: input.actor,
