@@ -254,9 +254,9 @@ export class S3ReleaseStore implements ReleaseStore {
           }),
           signal === undefined ? undefined : { abortSignal: signal },
         );
-        await Promise.all(
+        const pageFiles = await Promise.all(
           (listed.Contents ?? []).map(async (object) => {
-            if (object.Key === undefined) return;
+            if (object.Key === undefined) return undefined;
             const response = await this.options.client.send(
               new GetObjectCommand({ Bucket: this.options.bucket, Key: object.Key }),
               signal === undefined ? undefined : { abortSignal: signal },
@@ -265,9 +265,16 @@ export class S3ReleaseStore implements ReleaseStore {
             const markerIndex = `/${object.Key}`.indexOf(marker);
             const path =
               markerIndex >= 0 ? `/${object.Key}`.slice(markerIndex + marker.length) : object.Key;
-            files[path] = await responseBody(response.Body);
+            return { path, content: await responseBody(response.Body) };
           }),
         );
+        for (const file of pageFiles
+          .filter((entry): entry is { readonly path: string; readonly content: string } =>
+            Boolean(entry),
+          )
+          .sort((left, right) => left.path.localeCompare(right.path))) {
+          files[file.path] = file.content;
+        }
         continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
       } while (continuationToken !== undefined);
       const manifestSource = files["manifest.json"];
