@@ -104,23 +104,32 @@ async function api<TValue>(
   return (result.payload ?? result) as TValue;
 }
 
-async function releasePointer(environment: "staging" | "production" = "production"): Promise<{
+interface LiveReleasePointer {
   readonly environment: string;
   readonly releaseId: string;
   readonly revision: string;
-}> {
+}
+
+async function readReleasePointer(
+  environment: "staging" | "production",
+): Promise<LiveReleasePointer | undefined> {
   const response = await fetch(`${releasesOrigin}/environments/${environment}/current.json`, {
     cache: "no-store",
     signal: AbortSignal.timeout(15_000),
   });
+  if (response.status === 404) return undefined;
   if (!response.ok) {
     throw new Error(`${environment} pointer returned ${response.status}.`);
   }
-  return response.json() as Promise<{
-    readonly environment: string;
-    readonly releaseId: string;
-    readonly revision: string;
-  }>;
+  return response.json() as Promise<LiveReleasePointer>;
+}
+
+async function releasePointer(
+  environment: "staging" | "production" = "production",
+): Promise<LiveReleasePointer> {
+  const pointer = await readReleasePointer(environment);
+  if (pointer === undefined) throw new Error(`${environment} pointer returned 404.`);
+  return pointer;
 }
 
 const baseline = await releasePointer();
@@ -481,7 +490,7 @@ const staged = await api<{ readonly revision: string }>(
   stagingKey,
 );
 
-const currentStagingPointer = await releasePointer("staging").catch(() => undefined);
+const currentStagingPointer = await readReleasePointer("staging");
 const stagingReleaseKey = `live:${runId}:staging-release`;
 const stagingRelease = await api<{ readonly releaseId: string }>(
   reviewerSession,
