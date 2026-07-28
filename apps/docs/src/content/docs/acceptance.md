@@ -62,6 +62,7 @@ The opt-in live flow creates a real Change with a page plus pricing/navigation g
 uploads an image to the separate R2 asset bucket, stores its metadata on the Change and selects it
 through the same media reference consumed by the editor. It then updates the server-rendered
 preview, opens and independently approves a GitHub review, squash-merges to Staging, promotes with
-a release PR, verifies the asset reference in immutable CDN JSON, atomically rolls back, and
-restores the verified release. It requires a production session secret supplied through a local
+an independently verified immutable Staging release and atomic pointer, promotes with a release PR,
+verifies the asset reference in immutable production CDN JSON, atomically rolls back, and restores
+the verified release. It requires a production session secret supplied through a local
 permission-restricted file; the value is never printed.

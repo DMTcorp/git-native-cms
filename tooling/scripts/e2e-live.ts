@@ -104,16 +104,18 @@ async function api<TValue>(
   return (result.payload ?? result) as TValue;
 }
 
-async function releasePointer(): Promise<{
+async function releasePointer(environment: "staging" | "production" = "production"): Promise<{
   readonly environment: string;
   readonly releaseId: string;
   readonly revision: string;
 }> {
-  const response = await fetch(`${releasesOrigin}/environments/production/current.json`, {
+  const response = await fetch(`${releasesOrigin}/environments/${environment}/current.json`, {
     cache: "no-store",
     signal: AbortSignal.timeout(15_000),
   });
-  if (!response.ok) throw new Error(`Production pointer returned ${response.status}.`);
+  if (!response.ok) {
+    throw new Error(`${environment} pointer returned ${response.status}.`);
+  }
   return response.json() as Promise<{
     readonly environment: string;
     readonly releaseId: string;
@@ -474,6 +476,35 @@ const staged = await api<{ readonly revision: string }>(
   stagingKey,
 );
 
+const currentStagingPointer = await releasePointer("staging").catch(() => undefined);
+const stagingReleaseKey = `live:${runId}:staging-release`;
+const stagingRelease = await api<{ readonly releaseId: string }>(
+  reviewerSession,
+  "POST",
+  "releases/build-and-publish",
+  {
+    ref: "staging",
+    expectedRevision: staged.revision,
+    environment: "staging",
+    configVersion: 1,
+    registryDigest,
+    schemaVersion: 1,
+    ...(currentStagingPointer === undefined
+      ? {}
+      : { expectedPointerRevision: currentStagingPointer.revision }),
+    idempotencyKey: stagingReleaseKey,
+  },
+  stagingReleaseKey,
+);
+const liveStagingPointer = await releasePointer("staging");
+if (
+  liveStagingPointer.environment !== "staging" ||
+  liveStagingPointer.releaseId !== stagingRelease.releaseId ||
+  liveStagingPointer.revision !== stagingRelease.releaseId
+) {
+  throw new Error("Staging did not atomically point to its verified immutable release.");
+}
+
 const publishConfirmation = await api<{ readonly token: string }>(
   reviewerSession,
   "POST",
@@ -587,6 +618,7 @@ process.stdout.write(
     `READY Change ${change.id}`,
     `READY review PR ${submitted.pullRequest.url}`,
     `READY asset ${storedAsset.asset.id}`,
+    `READY staging release ${stagingRelease.releaseId}`,
     `READY release ${published.releaseId}`,
     `READY rollback ${baseline.releaseId} and restore ${restored.releaseId}`,
   ].join("\n") + "\n",
